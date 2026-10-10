@@ -8,13 +8,14 @@ is chosen when any of these hold:
 
 1. there is no change to select from;
 2. a changed or deleted file can change any test: a dependency lock or
-   manifest, build or test configuration, a production package's
-   ``__init__.py``, a shared test helper, CI config, Repowise's own config, or
-   a path listed in ``tests.full_run_on``;
+   manifest no ecosystem scope covers, build configuration (a Makefile, a
+   Dockerfile), runtime or package manager configuration (``.nvmrc``,
+   ``.tool-versions``), a shared test helper, CI config, Repowise's own
+   config, or a path listed in ``tests.full_run_on``;
 3. a changed or deleted file sits in a test tree but is not code (data, a
    snapshot, a golden file), or is a helper module no test imports;
-4. a changed file is neither code the index knows nor documentation, or is
-   documentation some code names (a test may read it);
+4. a changed file is neither code nor documentation and has no scope (below),
+   or its scope finds no test, or a file naming it has no known test;
 5. a changed code file has no known test, only a filename guess names one, or
    a route to it passes through a test helper no test imports, or any Python
    test helper while a conftest or pytest config loads plugins by name (its
@@ -39,6 +40,11 @@ package file for each module in it, and pytest loads a conftest for each test
 at or below it. Only documentation (``docs/`` and the root README, CHANGELOG,
 LICENSE and the like, never code) that no code names is skipped without a test.
 
+A file whose reach is known runs a scope (:mod:`.selection_scopes`) in place of
+everything: a manifest or lockfile its ecosystem's tests, a production
+``__init__.py`` the tests reaching the modules under it, an asset the tests
+reaching the code naming it or else its package's tests.
+
 :func:`runner_args` renders a selection as arguments for one test runner; a
 full run renders as the :data:`RUN_ALL` sentinel. pytest and go reject it as a
 path; jest and vitest treat arguments as patterns and would match nothing, so
@@ -53,13 +59,16 @@ import shlex
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pathspec
 
 from ..pytest_roots import PYTEST_CONFIG_NAMES, PytestRoots
 from ..support_paths import DOC_EXTENSIONS
 from ..test_paths import is_test_path, is_test_related_path, is_test_support_path
+
+if TYPE_CHECKING:
+    from .selection_scopes import Scope
 
 #: Printed alone instead of arguments when every test must run.
 RUN_ALL = ":all"
@@ -89,6 +98,9 @@ _FULL_RUN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "Gemfile",
             "composer.lock",
             "composer.json",
+            "pnpm-workspace.yaml",
+            "go.work",
+            "go.work.sum",
         ),
     ),
     (
@@ -112,6 +124,18 @@ _FULL_RUN_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "pom.xml",
             "Dockerfile*",
             "docker-compose*.y*ml",
+        ),
+    ),
+    (
+        "runtime or package manager configuration can change any test",
+        (
+            ".nvmrc",
+            ".node-version",
+            ".npmrc",
+            ".yarnrc",
+            ".yarnrc.yml",
+            ".python-version",
+            ".tool-versions",
         ),
     ),
     ("shared test data can change any test", ("**/testdata/**", "**/fixtures/**")),
@@ -234,7 +258,8 @@ class Selection:
     ``no-tests-needed``, ``deleted-test``, ``test-tree``, ``test-package``,
     ``conftest``, ``helper-importers``, ``coverage``,
     ``changed-test``, ``call-graph``, ``import-graph``, ``filename-pattern``,
-    ``unknown``, or ``none`` when nothing was asked (no index).
+    ``unknown``, ``none`` when nothing was asked (no index), or a scope's
+    ``ecosystem``, ``package-importers``, ``named-by`` or ``owner-package``.
     """
 
     run_all: bool
@@ -288,25 +313,46 @@ def is_scan_source(path: str) -> bool:
 
 
 def doc_readers(docs: Collection[str], sources: Iterable[tuple[str, str]]) -> dict[str, str]:
-    """``{doc: a file naming it}`` for each of *docs* some code or config names.
+    """``{doc: a file naming it}`` for each of *docs* some code or config names."""
+    return {doc: names[0] for doc, names in file_namers(docs, sources).items()}
 
-    A test that reads a doc names it (``ROOT / "README.md"``), and a
-    ``--doctest-glob`` turns every doc into a test, so either means the doc's
-    tests are unknown. Ceiling: a test that globs a directory names no file.
+
+def file_namers(
+    files: Collection[str], sources: Iterable[tuple[str, str]], *, limit: int | None = None
+) -> dict[str, list[str]]:
+    """``{file: the code naming it}`` for each of *files* some code or config names.
+
+    Code that reads a file names it (``ROOT / "README.md"``), and a
+    ``--doctest-glob`` turns every doc into a test, so the config declaring
+    one names each doc (first). One substring test per distinct file name and
+    source; a name with more than *limit* namers stops being searched, since
+    its caller cannot use the list. Ceiling: code that globs a directory names
+    no file.
     """
-    names = {doc: PurePosixPath(doc).name for doc in docs}
-    out: dict[str, str] = {}
+    by_name: dict[str, list[str]] = {}
+    for f in files:
+        by_name.setdefault(PurePosixPath(f).name, []).append(f)
+    docs = [f for f in files if PurePosixPath(f).suffix.lower() in _DOC_SUFFIXES]
+    found: dict[str, list[str]] = {}
+    open_names = set(by_name)
+    out: dict[str, list[str]] = {}
     for path, text in sources:
         # Config only for the glob, code only for names: pyproject's
         # ``readme = "README.md"`` is packaging, not a test.
         if not is_code_file(path):
             if "doctest-glob" in text:
-                return {doc: path for doc in docs}
+                for doc in docs:
+                    out.setdefault(doc, []).insert(0, path)
             continue
-        for doc, name in names.items():
-            if doc not in out and name in text:
-                out[doc] = path
-    return out
+        for name in [n for n in open_names if n in text]:
+            namers = found.setdefault(name, [])
+            namers.append(path)
+            if limit is not None and len(namers) > limit:
+                open_names.discard(name)
+    for name, namers in found.items():
+        for f in by_name[name]:
+            out.setdefault(f, []).extend(n for n in namers if n != f)
+    return {f: n for f, n in out.items() if n}
 
 
 def plugin_loader(sources: Iterable[tuple[str, str]]) -> str | None:
@@ -433,6 +479,8 @@ class SelectionInput:
     # :func:`plan_gap` for *index_gap*, with the targets whose rows *tiers* also
     # holds; None when the caller did not trace it, so any code there runs all.
     gap: GapPlan | None = None
+    # :func:`~.selection_scopes.trigger_scopes`' answer; *tiers* holds each route's rows.
+    scopes: Mapping[str, Scope] = field(default_factory=dict)
 
 
 @dataclass
@@ -449,9 +497,11 @@ def select_tests(inp: SelectionInput) -> Selection:
     """Decide what a change must run (see the module docstring for the rules)."""
     deleted = set(inp.deleted)
     paths = sorted(set(inp.changed) | deleted)
-    triage = _triage(paths, inp.config, inp.doc_readers)
+    scoped = [p for p in paths if p in inp.scopes]
+    triage = _triage([p for p in paths if p not in inp.scopes], inp.config, inp.doc_readers)
     run_all = [*_empty_change_reasons(paths, inp.label), *triage.run_all]
-    run_all += _index_reasons(inp, has_code=bool(triage.code))
+    walks = bool(triage.code) or any(inp.scopes[p].routes for p in scoped)
+    run_all += _index_reasons(inp, has_code=walks)
 
     evidence = _Evidence.of(inp, deleted)
     per_file, file_reasons = _tests_per_file(triage.code, evidence)
@@ -459,18 +509,27 @@ def select_tests(inp: SelectionInput) -> Selection:
     gap_tests, route_reasons = (
         _gap_route_tests(inp.gap.targets, paths, evidence) if traced else ([], [])
     )
+    in_scope, scope_reasons, scope_notes = _scoped_tests(scoped, inp.scopes, evidence)
+    run_all += scope_reasons
     if inp.index_available:
         run_all += file_reasons + route_reasons
     basis = {**triage.basis, **{path: per_file[path][1] for path in triage.code}}
+    basis.update({path: inp.scopes[path].basis for path in scoped})
 
     # The graph cannot say what an unplaced test reaches, so it always runs.
-    unplaced = [(t, t) for t in inp.unplaced_tests] if triage.code else []
+    unplaced = [(t, t) for t in inp.unplaced_tests] if triage.code or scoped else []
     tests, test_files = _runnable(
-        [*(t for path in triage.code for t in per_file[path][0]), *gap_tests, *unplaced]
+        [
+            *(t for path in triage.code for t in per_file[path][0]),
+            *gap_tests,
+            *in_scope,
+            *unplaced,
+        ]
     )
+    notes = _notes(inp, triage.skipped, bool(unplaced), traced)
     return Selection(
         run_all=bool(run_all),
-        reasons=tuple(run_all + _notes(inp, triage.skipped, bool(unplaced), traced)),
+        reasons=tuple(run_all + scope_notes + notes),
         tests=tests,
         test_files=test_files,
         packages=_go_packages(triage.code, deleted, inp.go_test_dirs),
@@ -507,6 +566,58 @@ def _triage(
         else:
             out.code.append(path)
     return out
+
+
+def _scoped_tests(
+    scoped: list[str], scopes: Mapping[str, Scope], ev: _Evidence
+) -> tuple[list[_TestRef], list[str], list[str]]:
+    """The tests each scoped file runs, the run-all reasons found, and a note per file.
+
+    A route shared by several files (one namer, one package) is decided once.
+    """
+    routes: dict[str, tuple[list[_TestRef], list[str]]] = {}
+    tests: list[_TestRef] = []
+    reasons: dict[str, None] = {}
+    notes: list[str] = []
+    for path in scoped:
+        scope = scopes[path]
+        if scope.run_all:
+            reasons[f"{path} changed: {scope.run_all}."] = None
+            continue
+        mine = [(t, t) for t in _scope_tests(scope, ev)]
+        before = len(reasons)
+        for route in scope.routes:
+            if route not in routes:
+                found, _, why = _file_tests(route, ev, route_only=True)
+                routes[route] = (found, why)
+            found, why = routes[route]
+            mine += found
+            reasons.update(dict.fromkeys(f"{path} changed; {r}" for r in why))
+            if route in scope.namers and not (found or why):
+                reasons[f"{path} is named by {route}, and no test is known to reach it."] = None
+        if not mine and len(reasons) == before:
+            reasons[f"{path} changed: {scope.why}, and no such test is known."] = None
+        tests += mine
+        files = {f for _, f in mine if f}
+        notes.append(f"{path} changed: {scope.why}; {len(files)} test file(s) run for it.")
+    if len(notes) > _MAX_SCOPE_NOTES:
+        more = len(notes) - _MAX_SCOPE_NOTES
+        notes = [*notes[:_MAX_SCOPE_NOTES], f"{more} more changed file(s) run a scoped set."]
+    return tests, list(reasons), notes
+
+
+_MAX_SCOPE_NOTES = 5
+
+
+def _scope_tests(scope: Scope, ev: _Evidence) -> list[str]:
+    """Known tests under *scope*'s root in its suffixes; a test this change deletes is gone."""
+    if scope.root is None:
+        return []
+    return [
+        t
+        for t in _under({scope.root}, ev.known_tests)
+        if (not scope.suffixes or t.lower().endswith(scope.suffixes)) and t not in ev.deleted
+    ]
 
 
 def _empty_change_reasons(paths: list[str], label: str) -> list[str]:
@@ -897,10 +1008,11 @@ def _no_test_reason(path: str, basis: str, ev: _Evidence) -> str:
 
 def _tests_under(inits: Collection[str], known_tests: Collection[str]) -> list[str]:
     """Every known test below the directory of each scope file."""
-    dirs = {str(PurePosixPath(i).parent) for i in inits}
-    return [
-        t for t in known_tests if any(d == "." or t.startswith(f"{d}/") for d in dirs)
-    ]
+    return _under({str(PurePosixPath(i).parent) for i in inits}, known_tests)
+
+
+def _under(dirs: Collection[str], files: Collection[str]) -> list[str]:
+    return [f for f in files if any(d == "." or f.startswith(f"{d}/") for d in dirs)]
 
 
 def expand_test_scopes(tests: Iterable[str], test_files: Collection[str]) -> list[str]:
