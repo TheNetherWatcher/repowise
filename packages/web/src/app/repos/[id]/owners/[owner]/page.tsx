@@ -8,7 +8,10 @@ import { OwnerProfileView } from "@repowise-dev/ui/owners/owner-profile";
 import { EmptyState } from "@repowise-dev/ui/shared/empty-state";
 import { fileEntityPath } from "@repowise-dev/ui/shared/entity";
 import { formatDate, formatRelativeTimeOrNull } from "@repowise-dev/ui/lib/format";
+import { ApiClientError } from "@/lib/api/client";
 import { getOwnerProfile } from "@/lib/api/owners";
+import { WhatDependsOnThem } from "@/components/owners/what-depends-on-them";
+import { buildOwnershipLabels } from "@/components/owners/ownership-labels";
 
 export async function generateMetadata(): Promise<Metadata> {
   const t = await getTranslations("views.contributors");
@@ -31,10 +34,16 @@ export default async function OwnerProfilePage({
 }) {
   const { id, owner } = await params;
   const t = await getTranslations("views.contributors");
+  const labels = buildOwnershipLabels(await getTranslations("views.contributors.ui"), t);
   const base = `/repos/${id}`;
   const ownerKey = decodeURIComponent(owner);
 
-  const profile = await getOwnerProfile(id, ownerKey).catch(() => null);
+  // Only a 404 means "no such contributor"; anything else is a failed
+  // request and goes to the route error boundary.
+  const profile = await getOwnerProfile(id, ownerKey).catch((e: unknown) => {
+    if (e instanceof ApiClientError && e.status === 404) return null;
+    throw e;
+  });
 
   if (!profile) {
     return (
@@ -43,9 +52,9 @@ export default async function OwnerProfilePage({
         title={t("profileTitle")}
       >
         <EmptyState
-          icon={<Users className="h-6 w-6" />}
           title={t("profileEmptyTitle")}
           description={t("profileEmptyDescription")}
+          action={{ label: t("profileBack"), href: `${base}/owners` }}
         />
       </PageShell>
     );
@@ -76,6 +85,8 @@ export default async function OwnerProfilePage({
       <OwnerProfileView
         owner={profile}
         base={base}
+        dependsOn={<WhatDependsOnThem repoId={id} ownerKey={profile.key} />}
+        labels={labels}
         hrefForFile={(path) => fileEntityPath(base, path)}
         hrefForModule={(mod) => `${base}/modules/${encodeURIComponent(mod)}`}
         hrefForCoAuthor={(c) =>

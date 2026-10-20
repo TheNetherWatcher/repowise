@@ -46,10 +46,17 @@ export const EXCLUSION_LABEL: Record<FixExclusion, string> = {
   gated_off: "switched off by a constant flag",
   cold_path: "run once per deploy, boot or incident",
   unreachable: "in dead code (delete it)",
-  inherent_dispatch: "one long dispatch on a value",
+  inherent_dispatch: "long dispatch on a value",
   small_function: "small functions",
   no_concrete_step: "with no concrete first edit",
   low_value_kind: "of a kind rarely worth doing",
+  kind_unaudited: "of a kind not yet audited for this list",
+  terminal_flow: "print and prompt flows",
+  moderate_quiet: "moderate functions that rarely change or break",
+  unmeasured_cost: "performance causes whose loop is not shown to grow",
+  cold_role: "performance causes only startup, a CLI, tooling or tests run",
+  background_unproven: "scheduled-job causes not shown to grow",
+  unconfirmed_cost: "performance causes whose cost rests on a name or a guess",
 };
 
 const EXCLUSION_ORDER: FixExclusion[] = [
@@ -72,6 +79,13 @@ const EXCLUSION_ORDER: FixExclusion[] = [
   "small_function",
   "no_concrete_step",
   "low_value_kind",
+  "kind_unaudited",
+  "terminal_flow",
+  "moderate_quiet",
+  "unmeasured_cost",
+  "cold_role",
+  "background_unproven",
+  "unconfirmed_cost",
 ];
 
 /**
@@ -126,9 +140,16 @@ export function fixLocation(item: Pick<FixItem, "target">): string {
   return line_start ? `${file_path}:${line_start}` : file_path;
 }
 
-/** What "Open plan" opens, named for the unit it lands on; null for a finding. */
-export function fixPlanLabel(item: Pick<FixItem, "kind">): string | null {
+/**
+ * What "Open plan" opens, named for the unit it lands on. A finding gets one
+ * only when it leads with a stored plan (`source.plan_ids` non-empty); a bare
+ * finding has nothing to open, so null.
+ */
+export function fixPlanLabel(item: Pick<FixItem, "kind" | "source">): string | null {
   if (item.kind === "refactor") return `Open the ${WORK_UNIT_LABEL.refactor}`;
   if (item.kind === "perf_fix") return `Open the ${WORK_UNIT_LABEL.perf_fix}`;
+  if (item.kind === "finding" && item.source.plan_ids.length > 0) {
+    return `Open the ${WORK_UNIT_LABEL.refactor}`;
+  }
   return null;
 }

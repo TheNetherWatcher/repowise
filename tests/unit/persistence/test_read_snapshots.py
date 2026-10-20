@@ -41,11 +41,11 @@ def _wire(value) -> str:
     return json.dumps(value, sort_keys=False, default=str)
 
 
-async def _live(session, rid: str) -> tuple[str, str, dict]:
+async def _live(session, rid: str) -> tuple[str, str]:
     clear_fix_first_cache()
     view = await load_actions_view(session, rid, now=NOW)
     queue = await load_fix_first(session, rid, limit=None)
-    return _wire(view), _wire(queue.as_dict()), dict(queue.refactoring_reasons)
+    return _wire(view), _wire(queue.as_dict())
 
 
 async def _snapshot_rows(session) -> int:
@@ -71,7 +71,7 @@ async def test_persist_writes_both_snapshots_once(async_session) -> None:
     rid = await _seed(async_session)
     await write_read_snapshots(async_session, rid)
     kinds = (await async_session.execute(select(ReadSnapshot.kind))).scalars().all()
-    assert sorted(kinds) == ["actions", "fix_first"]
+    assert sorted(kinds) == ["actions", "fix_first", "fix_first_counts"]
     # Nothing moved since, so a second pass writes nothing.
     assert not await fix_first_loader.write_fix_first_snapshot(async_session, rid)
     assert not await actions_loader.write_actions_snapshot(async_session, rid)
@@ -81,14 +81,13 @@ async def test_a_fresh_snapshot_is_served_and_equals_a_live_build(
     async_session, no_live_build
 ) -> None:
     rid = await _seed(async_session)
-    view, queue, reasons = await _live(async_session, rid)
+    view, queue = await _live(async_session, rid)
     await write_read_snapshots(async_session, rid)
     await async_session.commit()
 
     no_live_build()
     served = await load_fix_first(async_session, rid, limit=None)
     assert _wire(served.as_dict()) == queue
-    assert served.refactoring_reasons == reasons
     assert _wire(await load_actions_view(async_session, rid, now=NOW)) == view
     # Every limit and id is a slice of the stored queue.
     lead = served.items[0]
@@ -151,12 +150,12 @@ async def test_a_write_to_an_input_drops_the_snapshots(async_session, change) ->
     rid = await _seed(async_session)
     await write_read_snapshots(async_session, rid)
     await async_session.commit()
-    assert await _snapshot_rows(async_session) == 2
+    assert await _snapshot_rows(async_session) == 3
 
     await change(async_session, rid)
     await async_session.commit()
     assert await _snapshot_rows(async_session) == 0
-    view, queue, _ = await _live(async_session, rid)
+    view, queue = await _live(async_session, rid)
     assert _wire((await load_fix_first(async_session, rid, limit=None)).as_dict()) == queue
     assert _wire(await load_actions_view(async_session, rid, now=NOW)) == view
 
@@ -167,7 +166,7 @@ async def test_a_dropped_snapshot_would_have_been_wrong(async_session) -> None:
     await _triage(async_session, rid)
     await _new_secret(async_session, rid)
     await async_session.commit()
-    view, queue, _ = await _live(async_session, rid)
+    view, queue = await _live(async_session, rid)
     assert view != before[0] and queue != before[1]
 
 
@@ -181,7 +180,7 @@ async def test_writes_elsewhere_keep_the_snapshots(async_session) -> None:
     async with async_session.begin_nested():
         await async_session.execute(select(HealthFinding.id))  # a read in a savepoint
     await async_session.commit()
-    assert await _snapshot_rows(async_session) == 2
+    assert await _snapshot_rows(async_session) == 3
 
 
 async def test_writes_before_the_snapshot_in_one_session_keep_it(async_session) -> None:
@@ -189,7 +188,7 @@ async def test_writes_before_the_snapshot_in_one_session_keep_it(async_session) 
     await _new_secret(async_session, rid)
     await write_read_snapshots(async_session, rid)
     await async_session.commit()
-    assert await _snapshot_rows(async_session) == 2
+    assert await _snapshot_rows(async_session) == 3
 
 
 async def _stored_payload(session, kind: str) -> dict:
@@ -210,7 +209,7 @@ async def _replace_payload(session, kind: str, payload: dict) -> None:
 @pytest.mark.parametrize("kind", ["fix_first", "actions"])
 async def test_a_payload_an_older_build_wrote_is_a_miss(async_session, kind) -> None:
     rid = await _seed(async_session)
-    view, queue, _ = await _live(async_session, rid)
+    view, queue = await _live(async_session, rid)
     await write_read_snapshots(async_session, rid)
     payload = await _stored_payload(async_session, kind)
     if kind == "fix_first":
@@ -248,9 +247,25 @@ def test_decode_inverts_asdict_over_every_item_kind() -> None:
                             performance=PERFORMANCE, plans=PLANS, limit=None,
                             validate=lambda *_: profile)
     assert {i.kind for i in queue.items} == set(FIX_KINDS)
-    assert any(i.verify.tests for i in queue.items) and queue.refactoring_reasons
+    assert any(i.verify.tests for i in queue.items)
     stored = json.loads(json.dumps(asdict(queue)))
     assert decode_or_none(FixFirstQueue, stored) == queue
+
+
+def test_a_queue_stored_before_steps_had_code_still_decodes() -> None:
+    """A snapshot written before steps carried their helper texts and command,
+    and Verify its prerequisite, reads those as absent until it is rewritten."""
+    queue = build_fix_first(metrics=METRICS, findings=FINDINGS, refactoring=REFACTORING,
+                            performance=PERFORMANCE, plans=PLANS, limit=None)
+    stored = json.loads(json.dumps(asdict(queue)))
+    for item in stored["items"]:
+        del item["verify"]["prerequisite"]
+        for step in item["action"]["steps"]:
+            for key in ("signature", "call", "command"):
+                del step[key]
+    decoded = decode_or_none(FixFirstQueue, stored)
+    assert decoded is not None and [i.id for i in decoded.items] == [i.id for i in queue.items]
+    assert all(s.command is None for i in decoded.items for s in i.action.steps)
 
 
 @dataclass(frozen=True)
@@ -283,8 +298,8 @@ async def test_a_rewrite_in_the_writing_session_replaces_a_current_row(async_ses
     await _triage(async_session, rid)  # an input write, not yet committed
     await write_read_snapshots(async_session, rid)
     await async_session.commit()
-    assert await _snapshot_rows(async_session) == 2
-    view, queue, _ = await _live(async_session, rid)
+    assert await _snapshot_rows(async_session) == 3
+    view, queue = await _live(async_session, rid)
     clear_fix_first_cache()
     stored = await load_fix_first(async_session, rid, limit=None)
     assert _wire(stored.as_dict()) == queue
@@ -302,9 +317,11 @@ async def test_a_failed_view_write_leaves_nothing_stale(async_session, monkeypat
 
     monkeypatch.setattr(actions_loader, "write_actions_snapshot", broken)
     await _triage(async_session, rid)
-    await write_read_snapshots(async_session, rid)
+    failed = await write_read_snapshots(async_session, rid)
     await async_session.commit()
     assert await _snapshot_rows(async_session) == 0
+    # Named for the caller, whose output hides the core log.
+    assert [(name, str(exc)) for name, exc in failed] == [("actions", "build failed")]
 
 
 async def test_a_rolled_back_savepoint_still_invalidates(async_session) -> None:
@@ -328,12 +345,12 @@ async def test_one_sessions_write_does_not_mark_another(async_session, session_f
             await reader.execute(select(HealthFinding.id))
             await reader.commit()
         await other.rollback()
-    assert await _snapshot_rows(async_session) == 2
+    assert await _snapshot_rows(async_session) == 3
 
 
 async def test_a_corrupt_payload_is_a_miss(async_session) -> None:
     rid = await _seed(async_session)
-    view, queue, _ = await _live(async_session, rid)
+    view, queue = await _live(async_session, rid)
     await write_read_snapshots(async_session, rid)
     for kind in ("fix_first", "actions"):
         row = await async_session.get(ReadSnapshot, (rid, kind))

@@ -54,12 +54,13 @@ UNRELATED_TABLES = frozenset(
         "action_states",
         "answer_cache",
         "chat_messages",
+        "component_snapshots",
         "conversations",
         "doc_drift_references",
+        "events",
         "external_systems",
         "generation_jobs",
         "git_commit_health_deltas",
-        "git_function_blame",
         "graph_node_membership",
         "health_snapshots",
         "kg_node_meta",
@@ -72,6 +73,7 @@ UNRELATED_TABLES = frozenset(
         "read_snapshots",
         "refactoring_summaries",
         "repositories",
+        "snapshot_runs",
         "webhook_events",
         "wiki_page_versions",
         "wiki_pages",
@@ -197,18 +199,21 @@ async def refresh_snapshot(
     kind: str,
     key: str,
     build: Callable[[], Awaitable[Any]],
+    *,
+    force: bool = False,
 ) -> bool:
     """Store ``await build()`` (JSON-ready) as the ``kind`` row under ``key``,
     unless the row already holds that key and this transaction has written
-    no input (such a row would be dropped at commit). Returns whether it
-    wrote.
+    no input (such a row would be dropped at commit). ``force`` builds
+    anyway, for a builder that also writes what the stores lack. Returns
+    whether it wrote.
 
     Two writers racing on one row (two updates of one store) can fail on the
     primary key; the caller treats any failure as "no snapshot", which a
     reader answers by building live.
     """
     row = await session.get(ReadSnapshot, (repo_id, kind))
-    if row is not None and row.key == key and not stale(session.sync_session):
+    if row is not None and row.key == key and not force and not stale(session.sync_session):
         return False
     text = json.dumps(await build(), ensure_ascii=False)
     if row is None:

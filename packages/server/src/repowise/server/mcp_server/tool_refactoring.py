@@ -41,22 +41,21 @@ async def generate_refactoring_code(suggestion_id: str, repo: str | None = None)
     source spans it references. For Extract Class the result carries an LCOM4
     before/after self-check.
 
-    On unless the repo sets ``refactoring.llm.enabled: false`` in
-    ``.repowise/config.yaml``, which returns the plan with generation marked
-    unavailable. Uses the repo's configured
-    provider/model (BYO key) and caches by a content hash, so an unchanged plan
-    never regenerates.
+    Off unless the repo sets ``refactoring.llm.enabled: true`` in
+    ``.repowise/config.yaml``; while off it returns the plan with generation
+    marked unavailable. Uses the provider/model chat uses (BYO key) and caches
+    by a content hash, so an unchanged plan never regenerates.
 
     Args:
         suggestion_id: The ``id`` of a plan from ``get_health(... "refactoring")``.
         repo: Repo alias / id / path.
     """
     from repowise.core.analysis.health.refactoring.llm import (
-        build_enrichment_provider,
         enrich_suggestion,
         llm_enrichment_enabled,
     )
     from repowise.core.repo_config import load_repo_config
+    from repowise.server.provider_config import get_chat_provider_instance
 
     if repo == "all":
         return _unsupported_repo_all("generate_refactoring_code")
@@ -90,6 +89,7 @@ async def generate_refactoring_code(suggestion_id: str, repo: str | None = None)
             session, repository.id, ctx.alias or repository.name
         ).plan_recommendation(row)
         sug = recommendation.suggestion
+        detail = {**recommendation.detail_dict(), "id": row.public_id or row.id}
         meta = _build_meta(repository=repository)
 
     from repowise.server.mcp_server.tool_health import _serialize_refactoring
@@ -114,11 +114,11 @@ async def generate_refactoring_code(suggestion_id: str, repo: str | None = None)
         }
 
     try:
-        provider = build_enrichment_provider(repo_path)
+        provider = get_chat_provider_instance(repo_path=repo_path, repo_id=repository.id)
     except ValueError as exc:
         return {"error": "no_provider", "detail": str(exc), "_meta": meta}
 
-    result = await enrich_suggestion(sug, provider=provider, repo_path=repo_path)
+    result = await enrich_suggestion(sug, provider=provider, repo_path=repo_path, detail=detail)
     payload = result.to_dict()
     payload["suggestion_id"] = public_plan["id"]
     payload["resolved"] = True

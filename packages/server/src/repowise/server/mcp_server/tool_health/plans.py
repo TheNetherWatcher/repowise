@@ -33,6 +33,7 @@ def _render_plans(
         result["refactoring_plans_opportunities_total"] = page.opportunities_total
         if page.hidden is not None:
             result["refactoring_plans_hidden"] = page.hidden
+        result["refactoring_plans_counts"] = page.counts
         pager.note_page(
             "refactoring_plans",
             start=req.cursor,
@@ -43,12 +44,14 @@ def _render_plans(
     _merge_ignored(result, data.refactoring_plans_ignored)
     if req.wants("refactoring_plans"):
         scoped = data.pop.scoped
+        eligible = bool(data.metric_rows if scoped else data.pop.all_metrics)
         result["refactoring_plans_status"] = _refactoring_plans_status(
             available_plans_total=total,
             plans_emitted=len(rows),
             scoped=scoped,
-            has_eligible_metrics=bool(data.metric_rows if scoped else data.pop.all_metrics),
-            finding=next(iter(data.findings.emitted), None),
+            has_eligible_metrics=eligible,
+            # Read only when no plan exists: ranking the open set costs a full pass.
+            finding=data.findings.head() if eligible and not total else None,
             repo=req.repo,
         )
     # Prose suggestions for biomarkers without a structured plan ship once per
@@ -76,6 +79,11 @@ def _plan_row(step: dict[str, Any]) -> dict[str, Any]:
     row["classification"] = (step.get("applicability") or {}).get("classification")
     if step.get("relocated_by"):
         row["relocated_by"] = step["relocated_by"]
+    if step.get("leaves_above_bar"):
+        row["leaves_above_bar"] = step["leaves_above_bar"]
+    if step.get("relocates"):
+        # The plans after a split, which it stands for in the list.
+        row["relocates"] = step["relocates"]
     return row
 
 

@@ -18,6 +18,7 @@ import type {
   RefactoringOpportunityPage,
   RefactoringOpportunityRollup,
 } from "@repowise-dev/types/refactoring";
+import type { QueueCounts } from "@repowise-dev/types/queue";
 
 /** The page's facet counts, by facet then value. */
 export type RefactoringFacets = RefactoringOpportunityPage["facets"];
@@ -25,6 +26,10 @@ export type RefactoringFacets = RefactoringOpportunityPage["facets"];
 export interface RefactoringLedeProps {
   /** The repository rollup. Absent or unavailable and the lede does not render. */
   summary?: RefactoringOpportunityRollup | null | undefined;
+  /** The plans' count vocabulary; names how many of the open ones are worth doing now. */
+  counts?: QueueCounts | null | undefined;
+  /** Files indexed, for the all-clear line. */
+  indexedFileCount?: number | undefined;
   /** The page's facet counts. Absent and the chips do not render. */
   facets?: RefactoringFacets | null | undefined;
   /** Whether the list is narrowed to small effort, which the Quick wins chip toggles. */
@@ -45,8 +50,52 @@ function plural(n: number, one: string, many: string): string {
   return `${formatNumber(n)} ${n === 1 ? one : many}`;
 }
 
+/** The chips that filter the list to the subsets the lede names. */
+function LedeChips({
+  facets,
+  quickWinsActive,
+  onToggleQuickWins,
+  onSeeStructural,
+}: Pick<
+  RefactoringLedeProps,
+  "facets" | "onToggleQuickWins" | "onSeeStructural"
+> & { quickWinsActive: boolean }) {
+  const quickWins = facets?.effort?.S ?? 0;
+  const structuralShown = sumStructural(facets?.lead_type);
+  const showQuickWins = onToggleQuickWins && (quickWins > 0 || quickWinsActive);
+  const showStructural = onSeeStructural && structuralShown > 0;
+  if (!showQuickWins && !showStructural) return null;
+  return (
+    <div
+      className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-1"
+      role="group"
+      aria-label="Filter the list"
+    >
+      {showQuickWins ? (
+        <FilterChip active={quickWinsActive} onClick={onToggleQuickWins}>
+          Quick wins{" "}
+          <span className="font-mono tabular-nums">{formatNumber(quickWins)}</span>
+        </FilterChip>
+      ) : null}
+      {showStructural ? (
+        <button
+          type="button"
+          onClick={onSeeStructural}
+          className="rounded text-xs text-[var(--color-accent-primary)] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-primary)]"
+        >
+          See the{" "}
+          <span className="font-mono tabular-nums">{formatNumber(structuralShown)}</span>{" "}
+          structural
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 export function RefactoringLede({
   summary,
+  counts,
+  indexedFileCount,
   facets,
   quickWinsActive = false,
   onToggleQuickWins,
@@ -58,6 +107,26 @@ export function RefactoringLede({
 
   const total = summary.opportunities_total;
   const files = summary.files_total;
+  if (total === 0) {
+    return (
+      <PageLede
+        label="Open opportunities"
+        value="0"
+        unit={
+          indexedFileCount ? `across ${formatNumber(indexedFileCount)} indexed files` : undefined
+        }
+        layout="beside"
+        action={action}
+      >
+        <p>
+          <span className="font-medium text-[var(--color-text-primary)]">
+            Nothing is worth splitting, cutting or extracting right now.
+          </span>{" "}
+          New opportunities appear here as files grow or cycles form.
+        </p>
+      </PageLede>
+    );
+  }
   const steps = summary.steps_total;
   const mechanical = summary.mechanical_steps_total;
   const judgment = summary.judgment_steps_total;
@@ -65,16 +134,16 @@ export function RefactoringLede({
   const structural = sumStructural(summary.by_lead_type);
   const local = Math.max(0, total - structural);
 
-  const quickWins = facets?.effort?.S ?? 0;
-  const structuralShown = sumStructural(facets?.lead_type);
-  const showQuickWins = onToggleQuickWins && (quickWins > 0 || quickWinsActive);
-  const showStructural = onSeeStructural && structuralShown > 0;
-
   return (
     <PageLede
       label="Open opportunities"
       value={formatNumber(total)}
-      unit={files ? `one per file, across ${plural(files, "file", "files")}` : undefined}
+      unit={
+        files
+          ? `one per file, across ${plural(files, "file", "files")}` +
+            (counts ? `; ${formatNumber(counts.eligible)} worth doing first` : "")
+          : undefined
+      }
       action={action}
     >
       <p>
@@ -95,31 +164,12 @@ export function RefactoringLede({
           person&apos;s judgment first.
         </p>
       ) : null}
-      {showQuickWins || showStructural ? (
-        <div
-          className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-1"
-          role="group"
-          aria-label="Filter the list"
-        >
-          {showQuickWins ? (
-            <FilterChip active={quickWinsActive} onClick={onToggleQuickWins}>
-              Quick wins{" "}
-              <span className="font-mono tabular-nums">{formatNumber(quickWins)}</span>
-            </FilterChip>
-          ) : null}
-          {showStructural ? (
-            <button
-              type="button"
-              onClick={onSeeStructural}
-              className="rounded text-xs text-[var(--color-accent-primary)] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-primary)]"
-            >
-              See the{" "}
-              <span className="font-mono tabular-nums">{formatNumber(structuralShown)}</span>{" "}
-              structural
-            </button>
-          ) : null}
-        </div>
-      ) : null}
+      <LedeChips
+        facets={facets}
+        quickWinsActive={quickWinsActive}
+        onToggleQuickWins={onToggleQuickWins}
+        onSeeStructural={onSeeStructural}
+      />
     </PageLede>
   );
 }

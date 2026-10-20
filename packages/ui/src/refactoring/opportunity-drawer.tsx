@@ -30,14 +30,20 @@ import { Layers, Sparkles, Terminal } from "lucide-react";
 import { Sheet, SheetContent, SheetTitle } from "../ui/sheet";
 import { Skeleton, SkeletonRegion } from "../ui/skeleton";
 import { CollapsibleSection } from "../shared/collapsible-section";
-import { formatNumber } from "../lib/format";
+import { disambiguateBasenames, formatNumber } from "../lib/format";
+import { FilePath } from "../shared/file-path";
 import { ValidationSummary } from "./validation-summary";
 import { CONFIDENCE_LABEL, EFFORT_LABEL, typeMeta } from "./meta";
 import { CodeBlock } from "./plan-detail";
 import { SourceExcerpt } from "./source-excerpt";
 import { RelatedWork, type RelatedWorkSlotProps } from "../health/related-work";
+import { PreviewBadge } from "../health/preview-badge";
 import { GenerateCodePanel } from "./generate-code-panel";
-import { extractHelperDetail, extractMethodSignature, stepExcerptRange } from "./types";
+import {
+  RefactoringModelToggle,
+  type RefactoringModelToggleProps,
+} from "./refactoring-settings-card";
+import { extractHelperDetail, extractMethodSignature, formatSpans, stepExcerptRange } from "./types";
 import {
   ORDERING_NOTE,
   STATUS_LABEL,
@@ -85,6 +91,8 @@ export interface OpportunityDrawerProps extends RelatedWorkSlotProps {
   readSource?: ((path: string) => Promise<string>) | undefined;
   /** Opt-in model drafting of one step's diff. Omit when generation is off. */
   onGenerateCode?: ((plan: RefactoringPlan) => Promise<GeneratedCode>) | undefined;
+  /** Offer the model switch inside steps when code generation is off. */
+  modelSetting?: RefactoringModelToggleProps | undefined;
 }
 
 export function OpportunityDrawer({
@@ -99,6 +107,7 @@ export function OpportunityDrawer({
   fileHref,
   readSource,
   onGenerateCode,
+  modelSetting,
   related,
   relatedWorkHref,
   onNavigate,
@@ -120,13 +129,14 @@ export function OpportunityDrawer({
             fileHref={fileHref}
             readSource={readSource}
             onGenerateCode={onGenerateCode}
+            modelSetting={modelSetting}
             related={related}
             relatedWorkHref={relatedWorkHref}
             onNavigate={onNavigate}
           />
         ) : loading ? (
           <>
-            <SheetTitle className="border-b border-[var(--color-border-default)] px-5 py-4 pr-12 text-[15px]">
+            <SheetTitle className="border-b border-[var(--color-border-default)] px-5 py-4 pr-12 text-sm">
               Loading refactoring plan
             </SheetTitle>
             <SkeletonRegion className="space-y-4 px-5 py-5" label="Loading refactoring plan">
@@ -136,7 +146,7 @@ export function OpportunityDrawer({
           </>
         ) : detail && !detail.found ? (
           <>
-            <SheetTitle className="border-b border-[var(--color-border-default)] px-5 py-4 pr-12 text-[15px]">
+            <SheetTitle className="border-b border-[var(--color-border-default)] px-5 py-4 pr-12 text-sm">
               Refactoring plan unavailable
             </SheetTitle>
             <div className="space-y-2 px-5 py-5 text-sm text-[var(--color-text-secondary)]">
@@ -156,7 +166,7 @@ export function OpportunityDrawer({
           </>
         ) : error ? (
           <>
-            <SheetTitle className="border-b border-[var(--color-border-default)] px-5 py-4 pr-12 text-[15px]">
+            <SheetTitle className="border-b border-[var(--color-border-default)] px-5 py-4 pr-12 text-sm">
               Refactoring plan unavailable
             </SheetTitle>
             <p className="px-5 py-5 text-sm text-[var(--color-text-secondary)]">{error}</p>
@@ -177,6 +187,7 @@ function DrawerBody({
   fileHref,
   readSource,
   onGenerateCode,
+  modelSetting,
   related,
   relatedWorkHref,
   onNavigate,
@@ -193,6 +204,7 @@ function DrawerBody({
   fileHref?: ((path: string, line?: number | null) => string | undefined) | undefined;
   readSource?: ((path: string) => Promise<string>) | undefined;
   onGenerateCode?: ((plan: RefactoringPlan) => Promise<GeneratedCode>) | undefined;
+  modelSetting?: RefactoringModelToggleProps | undefined;
 } & RelatedWorkSlotProps) {
   const meta = typeMeta(detail.lead_refactoring_type || "");
   const plansById = React.useMemo(
@@ -201,6 +213,10 @@ function DrawerBody({
   );
   const name = detail.file_path.split("/").pop() ?? detail.file_path;
   const others = detail.affected_files.filter((f) => f !== detail.file_path);
+  const otherLabels = React.useMemo(
+    () => disambiguateBasenames(detail.affected_files),
+    [detail.affected_files],
+  );
   // The opportunity resolved but its steps did not load. Everything else in the
   // drawer, triage included, still describes a real opportunity.
   const stepsUnavailable = detail.details_status === "unavailable";
@@ -243,19 +259,27 @@ function DrawerBody({
   return (
     <>
       <div className="border-b border-[var(--color-border-default)] px-5 py-4 pr-12">
-        <div className="text-[11px] text-[var(--color-text-secondary)]">
+        <div className="text-xs text-[var(--color-text-secondary)]">
           {meta.label}
           {detail.lead_biomarker ? ` · against ${humanizeBiomarker(detail.lead_biomarker)}` : ""}
+          {detail.preview ? (
+            <span className="ml-2">
+              <PreviewBadge note={detail.preview} />
+            </span>
+          ) : null}
         </div>
-        <SheetTitle className="mt-0.5 break-words font-mono text-[15px] font-semibold text-[var(--color-text-primary)]">
+        <SheetTitle className="mt-0.5 break-words font-mono text-sm font-semibold text-[var(--color-text-primary)]">
           {name}
         </SheetTitle>
-        <p className="mt-1 break-all font-mono text-[11.5px] text-[var(--color-text-tertiary)]">
-          {detail.file_path}
-        </p>
+        <FilePath
+          path={detail.file_path}
+          mode="full"
+          copyable
+          className="mt-1 block text-[var(--color-text-tertiary)]"
+        />
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--color-border-default)] px-5 py-2.5 text-[12.5px] text-[var(--color-text-secondary)]">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--color-border-default)] px-5 py-2.5 text-xs text-[var(--color-text-secondary)]">
         {facts.map((f) => (
           <span key={f}>{f}</span>
         ))}
@@ -268,7 +292,7 @@ function DrawerBody({
         )}
       </div>
 
-      <p className="border-b border-[var(--color-border-default)] px-5 py-2 text-[12px] text-[var(--color-text-secondary)]">
+      <p className="border-b border-[var(--color-border-default)] px-5 py-2 text-xs text-[var(--color-text-secondary)]">
         {blastRadiusLine(detail)}{" "}
         {guardingTests > 0
           ? `${guarding.atLeast ? "At least " : ""}${formatNumber(guardingTests)} guarding test${guardingTests === 1 ? "" : "s"} reach it.`
@@ -288,7 +312,7 @@ function DrawerBody({
 
         {onStatusChange ? (
           <section>
-            <h4 className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+            <h4 className="mb-2 font-mono text-caption uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
               Triage
             </h4>
             <div role="radiogroup" aria-label="Triage this refactoring plan" className="flex flex-wrap gap-1.5">
@@ -304,7 +328,7 @@ function DrawerBody({
                     onClick={() => void setStatus(option.value)}
                     className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
                       current
-                        ? "bg-[var(--color-accent-muted)] text-[var(--color-accent-primary)]"
+                        ? "bg-[var(--color-bg-selected)] text-[var(--color-text-primary)] shadow-[inset_0_-2px_0_var(--color-accent-primary)]"
                         : "text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)]"
                     }`}
                   >
@@ -313,7 +337,7 @@ function DrawerBody({
                 );
               })}
             </div>
-            <p className="mt-1.5 text-[11.5px] text-[var(--color-text-tertiary)]">
+            <p className="mt-1.5 text-xs text-[var(--color-text-tertiary)]">
               Applies to all {detail.step_count} step{detail.step_count === 1 ? "" : "s"}.{" "}
               {status === "false_positive"
                 ? "A false positive is suppressed on every later analysis."
@@ -322,7 +346,7 @@ function DrawerBody({
             <p
               role="status"
               className={
-                failed ? "mt-1 text-[11.5px] text-[var(--color-error)]" : "sr-only"
+                failed ? "mt-1 text-xs text-[var(--color-error)]" : "sr-only"
               }
             >
               {failed ? "Could not save that. The refactoring plan is unchanged." : ""}
@@ -331,16 +355,16 @@ function DrawerBody({
         ) : null}
 
         <section>
-          <h4 className="mb-1 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+          <h4 className="mb-1 font-mono text-caption uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
             The steps, in order
           </h4>
           {anyRelocated ? (
-            <p className="mb-3 rounded-md border border-[var(--color-caution)]/40 bg-[var(--color-caution)]/10 px-3 py-2 text-[12.5px] text-[var(--color-text-secondary)]">
+            <p className="mb-3 rounded-md border border-[var(--color-caution)]/40 bg-[var(--color-caution)]/10 px-3 py-2 text-xs text-[var(--color-text-secondary)]">
               {detail.ordering_note ?? ORDERING_NOTE}
             </p>
           ) : null}
           {stepsUnavailable ? (
-            <p className="text-[12.5px] text-[var(--color-text-secondary)]">
+            <p className="text-xs text-[var(--color-text-secondary)]">
               The {detail.step_count} step{detail.step_count === 1 ? "" : "s"} for this refactoring
               plan could not be loaded. Try again shortly, or ask for it by id below.
             </p>
@@ -356,11 +380,12 @@ function DrawerBody({
                 fileHref={fileHref}
                 readSource={readSource}
                 onGenerateCode={onGenerateCode}
+                modelSetting={modelSetting}
               />
             ))}
           </ol>
           {detail.steps_total != null && detail.steps_emitted < detail.steps_total ? (
-            <p className="mt-2 text-[11.5px] text-[var(--color-text-tertiary)]">
+            <p className="mt-2 text-xs text-[var(--color-text-tertiary)]">
               Showing {detail.steps_emitted} of {detail.steps_total} steps.
             </p>
           ) : null}
@@ -384,7 +409,7 @@ function DrawerBody({
               ))}
             </div>
           ) : (
-            <p className="text-[12.5px] text-[var(--color-text-secondary)]">
+            <p className="text-xs text-[var(--color-text-secondary)]">
               No guarding tests found. Write one that pins the current behaviour before applying
               these steps.
             </p>
@@ -404,7 +429,7 @@ function DrawerBody({
             {/* Named as observation, not instruction. These are mostly demoted
                 clone groups: real duplication, not a change worth making on its
                 own account. */}
-            <p className="mb-2.5 text-[12.5px] text-[var(--color-text-secondary)]">
+            <p className="mb-2.5 text-xs text-[var(--color-text-secondary)]">
               Supporting observations on this file. They are why the diagnosis reads the way it
               does, not extra work to do.
             </p>
@@ -412,13 +437,13 @@ function DrawerBody({
               {detail.evidence.map((item) => (
                 <li
                   key={item.plan_id}
-                  className="border-t border-[var(--color-border-default)] pt-1.5 text-[12.5px] text-[var(--color-text-secondary)]"
+                  className="border-t border-[var(--color-border-default)] pt-1.5 text-xs text-[var(--color-text-secondary)]"
                 >
                   <span className="text-[var(--color-text-tertiary)]">
                     {typeMeta(item.refactoring_type).label}
                   </span>
                   {item.target_symbol ? (
-                    <span className="ml-2 break-all font-mono text-[12px] text-[var(--color-text-primary)]">
+                    <span className="ml-2 break-all font-mono text-xs text-[var(--color-text-primary)]">
                       {item.target_symbol}
                     </span>
                   ) : null}
@@ -426,7 +451,7 @@ function DrawerBody({
               ))}
             </ul>
             {detail.evidence_truncated ? (
-              <p className="mt-2 text-[11.5px] text-[var(--color-text-tertiary)]">
+              <p className="mt-2 text-xs text-[var(--color-text-tertiary)]">
                 Showing {detail.evidence_emitted} of {detail.evidence_total} observations.
               </p>
             ) : null}
@@ -451,13 +476,13 @@ function DrawerBody({
                     {href ? (
                       <a
                         href={href}
-                        className="break-all font-mono text-xs text-[var(--color-text-secondary)] underline-offset-2 hover:text-[var(--color-accent-primary)] hover:underline"
+                        className="flex min-w-0 text-[var(--color-text-secondary)] underline-offset-2 hover:text-[var(--color-accent-primary)] hover:underline"
                       >
-                        {f}
+                        <FilePath path={f} mode="distinguishing" labels={otherLabels} />
                       </a>
                     ) : (
-                      <span className="break-all font-mono text-xs text-[var(--color-text-secondary)]">
-                        {f}
+                      <span className="flex min-w-0 text-[var(--color-text-secondary)]">
+                        <FilePath path={f} mode="distinguishing" labels={otherLabels} />
                       </span>
                     )}
                   </li>
@@ -475,7 +500,7 @@ function DrawerBody({
             </span>
           }
         >
-          <p className="text-[12.5px] text-[var(--color-text-secondary)]">
+          <p className="text-xs text-[var(--color-text-secondary)]">
             Copy the prompt with the Claude + MCP flavor and it carries this call, so the agent
             can pull the same record itself rather than working from the pasted copy. The other
             flavors inline the whole plan instead, because they have no tool that resolves an id.
@@ -515,6 +540,7 @@ function StepCard({
   fileHref,
   readSource,
   onGenerateCode,
+  modelSetting,
 }: {
   step: OpportunityStep;
   index: number;
@@ -524,6 +550,7 @@ function StepCard({
   fileHref?: ((path: string, line?: number | null) => string | undefined) | undefined;
   readSource?: ((path: string) => Promise<string>) | undefined;
   onGenerateCode?: ((plan: RefactoringPlan) => Promise<GeneratedCode>) | undefined;
+  modelSetting?: RefactoringModelToggleProps | undefined;
 }) {
   const meta = typeMeta(step.refactoring_type);
   const mechanical = step.applicability.classification === "mechanical";
@@ -538,11 +565,11 @@ function StepCard({
         <span className="font-mono text-xs tabular-nums text-[var(--color-text-tertiary)]">
           {String(index + 1).padStart(2, "0")}
         </span>
-        <span className="text-[12.5px] text-[var(--color-text-secondary)]">{meta.label}</span>
+        <span className="text-xs text-[var(--color-text-secondary)]">{meta.label}</span>
         {/* Not a colour-only mark: the word is the signal, and the tint only
             reinforces it. */}
         <span
-          className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
+          className={`rounded px-1.5 py-0.5 text-xs font-medium ${
             mechanical
               ? "bg-[var(--color-success)]/12 text-[var(--color-success)]"
               : "bg-[var(--color-bg-inset)] text-[var(--color-text-secondary)]"
@@ -551,44 +578,41 @@ function StepCard({
           {mechanical ? "Mechanical" : "Judgment"}
         </span>
         {isRelocated(step) ? (
-          <span className="rounded bg-[var(--color-caution)]/15 px-1.5 py-0.5 text-[11px] font-medium text-[var(--color-caution)]">
+          <span className="rounded bg-[var(--color-caution)]/15 px-1.5 py-0.5 text-xs font-medium text-[var(--color-caution)]">
             Moved by an earlier step
           </span>
         ) : null}
+        <PreviewBadge note={plan?.preview} />
       </div>
 
       <button
         type="button"
         onClick={onOpenStep ? () => onOpenStep(step.plan_id) : undefined}
         disabled={!onOpenStep}
-        className="mt-1 block break-all text-left font-mono text-[13px] font-medium text-[var(--color-text-primary)] enabled:hover:text-[var(--color-accent-primary)]"
+        className="mt-1 block break-all text-left font-mono text-sm font-medium text-[var(--color-text-primary)] enabled:hover:text-[var(--color-accent-primary)]"
       >
         {step.target_symbol || meta.label}
       </button>
 
-      <p className="mt-0.5 break-all font-mono text-[11px] text-[var(--color-text-tertiary)]">
+      <p className="mt-0.5 text-[var(--color-text-tertiary)]">
         {href ? (
           <a href={href} className="underline-offset-2 hover:underline">
-            {step.file_path}
-            {span ? `:${span}` : ""}
+            <FilePath path={step.file_path} line={span || null} mode="full" />
           </a>
         ) : (
-          <>
-            {step.file_path}
-            {span ? `:${span}` : ""}
-          </>
+          <FilePath path={step.file_path} line={span || null} mode="full" />
         )}
       </p>
 
       {isRelocated(step) ? (
-        <p className="mt-1.5 text-[12px] text-[var(--color-text-secondary)]">
+        <p className="mt-1.5 text-xs text-[var(--color-text-secondary)]">
           An earlier step moves this symbol out of that file, so the path and lines above say where
           it was. Find it again before applying this one.
         </p>
       ) : null}
 
       {step.applicability.reasons.length > 0 ? (
-        <p className="mt-1.5 text-[12px] text-[var(--color-text-secondary)]">
+        <p className="mt-1.5 text-xs text-[var(--color-text-secondary)]">
           {step.applicability.reasons.map(humanizeBiomarker).join("; ")}.
         </p>
       ) : null}
@@ -596,12 +620,18 @@ function StepCard({
       {step.applicability.unknowns.length > 0 ? (
         // An unknown is first-class. Leaving it out would let a check the layer
         // never ran read as a check that passed.
-        <p className="mt-1 text-[12px] text-[var(--color-text-tertiary)]">
+        <p className="mt-1 text-xs text-[var(--color-text-tertiary)]">
           Not established: {step.applicability.unknowns.map(humanizeBiomarker).join(", ")}.
         </p>
       ) : null}
 
-      <StepCode step={step} plan={plan} readSource={readSource} onGenerateCode={onGenerateCode} />
+      <StepCode
+        step={step}
+        plan={plan}
+        readSource={readSource}
+        onGenerateCode={onGenerateCode}
+        modelSetting={modelSetting}
+      />
     </li>
   );
 }
@@ -621,18 +651,27 @@ function StepCode({
   plan,
   readSource,
   onGenerateCode,
+  modelSetting,
 }: {
   step: OpportunityStep;
   plan?: RefactoringPlan | undefined;
   readSource?: ((path: string) => Promise<string>) | undefined;
   onGenerateCode?: ((plan: RefactoringPlan) => Promise<GeneratedCode>) | undefined;
+  modelSetting?: RefactoringModelToggleProps | undefined;
 }) {
   const [open, setOpen] = React.useState(false);
   const stored = plan ? extractHelperDetail(plan) : null;
   const range = stepExcerptRange(step, plan);
-  const extraction = range?.extraction ?? null;
-  const slice = extraction?.span ?? null;
   const canRead = Boolean(readSource && range);
+  // One read per file however many stage excerpts ask for it.
+  const readOnce = React.useMemo(() => {
+    if (!readSource) return undefined;
+    const reads = new Map<string, Promise<string>>();
+    return (path: string) => {
+      if (!reads.has(path)) reads.set(path, readSource(path));
+      return reads.get(path)!;
+    };
+  }, [readSource]);
   if (!stored?.snippet && !canRead && !plan) return null;
   return (
     <div className="mt-2">
@@ -640,40 +679,118 @@ function StepCode({
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
-        className="rounded text-[12px] font-medium text-[var(--color-accent-primary)] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-primary)]"
+        className="rounded text-xs font-medium text-[var(--color-accent-primary)] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-primary)]"
       >
         {open ? "Hide the code" : "Show the code"}
       </button>
       {open ? (
         <div className="mt-2 space-y-3">
-          {extraction && slice ? (
-            <p className="text-[11.5px] text-[var(--color-text-tertiary)]">
-              Lines {slice.start} to {slice.end} become{" "}
-              <code className="break-all font-mono text-[var(--color-text-primary)]">
-                {extractMethodSignature(extraction)}
-              </code>
-            </p>
-          ) : null}
-          {stored?.snippet ? (
-            <CodeBlock code={stored.snippet} startLine={stored.snippetStartLine} />
-          ) : canRead ? (
-            <SourceExcerpt
-              path={step.file_path}
-              start={range!.start}
-              end={range!.end}
-              readSource={readSource!}
-            />
-          ) : null}
-          {plan && onGenerateCode ? (
-            <GenerateCodePanel plan={plan} onGenerate={onGenerateCode} />
-          ) : plan ? (
-            <p className="text-[11.5px] text-[var(--color-text-tertiary)]">
-              A diff preview is drafted by a model on request. Code generation is off here.
-            </p>
-          ) : null}
+          <StepSpans range={range} />
+          <StepExcerpt
+            step={step}
+            stored={stored}
+            range={canRead ? range : null}
+            readSource={readOnce}
+          />
+          <StepDiff plan={plan} onGenerateCode={onGenerateCode} modelSetting={modelSetting} />
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** Which lines the step lifts out, and into what. */
+function StepSpans({ range }: { range: ReturnType<typeof stepExcerptRange> }) {
+  const extraction = range?.extraction ?? null;
+  const slice = extraction?.span ?? null;
+  const stages = range?.stages ?? [];
+  return (
+    <>
+      {stages.length > 0 ? (
+        <p className="text-[11.5px] text-[var(--color-text-tertiary)]">
+          Lines{" "}
+          <span className="font-mono tabular-nums text-[var(--color-text-secondary)]">
+            {formatSpans(stages.map((st) => st.span))}
+          </span>{" "}
+          become {stages.length} helpers the function calls in order.
+        </p>
+      ) : null}
+      {extraction && slice ? (
+        <p className="text-[11.5px] text-[var(--color-text-tertiary)]">
+          Lines {slice.start} to {slice.end} become{" "}
+          <code className="break-all font-mono text-[var(--color-text-primary)]">
+            {extractMethodSignature(extraction)}
+          </code>
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * The excerpt itself: the stored snippet when the plan carries one, else each
+ * stage read on its own, else the step's one range. `range` is null when the
+ * file cannot be read.
+ */
+function StepExcerpt({
+  step,
+  stored,
+  range,
+  readSource,
+}: {
+  step: OpportunityStep;
+  stored: ReturnType<typeof extractHelperDetail> | null;
+  range: ReturnType<typeof stepExcerptRange>;
+  readSource: ((path: string) => Promise<string>) | undefined;
+}) {
+  if (stored?.snippet) {
+    return <CodeBlock code={stored.snippet} startLine={stored.snippetStartLine} />;
+  }
+  if (!range) return null;
+  if (range.stages.length > 0) {
+    // Each stage on its own: one range from the first stage to the last
+    // would show the lines between them and could cut a later stage.
+    return range.stages.map((st, i) => (
+      <div key={st.span.start} className="space-y-1">
+        <p className="font-mono text-[11px] text-[var(--color-text-tertiary)]">
+          {`${st.name ?? `Stage ${i + 1}`} · lines ${formatSpans([st.span])}`}
+        </p>
+        <SourceExcerpt
+          path={step.file_path}
+          start={st.span.start}
+          end={st.span.end}
+          readSource={readSource!}
+        />
+      </div>
+    ));
+  }
+  return (
+    <SourceExcerpt
+      path={step.file_path}
+      start={range.start}
+      end={range.end}
+      readSource={readSource!}
+    />
+  );
+}
+
+/** The diff preview, the model setting that turns it on, or why it is off. */
+function StepDiff({
+  plan,
+  onGenerateCode,
+  modelSetting,
+}: {
+  plan?: RefactoringPlan | undefined;
+  onGenerateCode?: ((plan: RefactoringPlan) => Promise<GeneratedCode>) | undefined;
+  modelSetting?: RefactoringModelToggleProps | undefined;
+}) {
+  if (!plan) return null;
+  if (onGenerateCode) return <GenerateCodePanel plan={plan} onGenerate={onGenerateCode} />;
+  if (modelSetting) return <RefactoringModelToggle {...modelSetting} />;
+  return (
+    <p className="text-xs text-[var(--color-text-tertiary)]">
+      A diff preview is drafted by a model on request. Code generation is off here.
+    </p>
   );
 }
 

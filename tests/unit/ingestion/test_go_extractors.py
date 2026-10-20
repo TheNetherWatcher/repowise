@@ -40,6 +40,49 @@ class TestGoSymbols:
         assert "Hello" in names
 
 
+class TestGoInterfaceMethodSpecs:
+    """A ``method_elem`` of a named interface is a bodiless method symbol."""
+
+    _SRC = (
+        b"package x\n\n"
+        b"type Base interface{ Close() error }\n\n"
+        b"type Reader interface {\n"
+        b"\tBase\n"
+        b"\tPeek() byte\n"
+        b"\tAdvance(n int)\n"
+        b"}\n"
+    )
+
+    def test_each_method_is_a_symbol_parented_by_the_interface(self, parser: ASTParser) -> None:
+        result = parser.parse_file(_file("x/reader.go"), self._SRC)
+        specs = {s.id: s for s in result.symbols if s.parent_name == "Reader"}
+        assert set(specs) == {"x/reader.go::Reader::Peek", "x/reader.go::Reader::Advance"}
+        for spec in specs.values():
+            assert spec.kind == "method"
+            assert spec.is_declaration
+
+    def test_an_embedded_interface_is_not_a_method_symbol(self, parser: ASTParser) -> None:
+        result = parser.parse_file(_file("x/reader.go"), self._SRC)
+        assert not any(s.name == "Base" and s.kind == "method" for s in result.symbols)
+        assert not any(s.parent_name == "Reader" and s.name == "Base" for s in result.symbols)
+
+    def test_the_interface_itself_is_unchanged(self, parser: ASTParser) -> None:
+        result = parser.parse_file(_file("x/reader.go"), self._SRC)
+        iface = next(s for s in result.symbols if s.id == "x/reader.go::Reader")
+        assert iface.kind == "interface"
+
+    def test_an_anonymous_interface_declares_no_symbol(self, parser: ASTParser) -> None:
+        src = (
+            b"package x\n\n"
+            b"type Holder struct{ v interface{ Foo() } }\n\n"
+            b"func take(a interface{ Bar() }) {}\n\n"
+            b"func local() { type L interface{ Baz() } }\n"
+        )
+        result = parser.parse_file(_file(), src)
+        names = {s.name for s in result.symbols}
+        assert not names & {"Foo", "Bar", "Baz"}
+
+
 class TestGoHeritage:
     def test_struct_embedding(self, parser: ASTParser) -> None:
         src = b"package x\n\ntype Base struct{}\n\ntype Foo struct {\n  Base\n  Name string\n}\n"
@@ -250,3 +293,77 @@ class TestGoGenericCallEdges:
         generic = self._edges(tmp_path / "generic", "\t_ = List[int](xs)\n")
         assert plain == {("p/main.go::Build", "p/main.go::MyInt")}
         assert generic == {("p/main.go::Build", "p/main.go::List")}
+
+
+class TestGoCallThroughAnIndexedFuncValue:
+    """``handlers[k](x)`` is the syntax of ``F[int](x)``, so the patterns of
+    #2988 capture it too, under the container's name. That site resolves as the
+    plain call through a func value (``handler(x)``) does: to nothing when the
+    name is a local, a parameter or a field, and to the variable when it is
+    declared at package level."""
+
+    def _sites(self, parser: ASTParser, body: bytes) -> list[tuple[str | None, str]]:
+        src = b"package p\n\nfunc Build() {\n" + body + b"}\n"
+        result = parser.parse_file(_file(), src)
+        return [(c.receiver_name, c.target_name) for c in result.calls]
+
+    @pytest.mark.parametrize(
+        ("body", "site"),
+        [
+            (b"\thandlers[k](x)\n", (None, "handlers")),
+            (b"\thandlers[k](x, y)\n", (None, "handlers")),
+            (b"\tfs[0]()\n", (None, "fs")),
+            (b"\ts.handlers[k](x)\n", ("s", "handlers")),
+            (b"\ts.handlers[k](x, y)\n", ("s", "handlers")),
+        ],
+    )
+    def test_the_container_is_the_recorded_site(
+        self, parser: ASTParser, body: bytes, site: tuple[str | None, str]
+    ) -> None:
+        assert self._sites(parser, body) == [site]
+
+    def test_a_doubly_indexed_call_is_no_site(self, parser: ASTParser) -> None:
+        """``m[a][b](x)`` cannot be a generic call, and no pattern reaches it."""
+        assert self._sites(parser, b"\tm[a][b](x)\n") == []
+
+    def _edges(self, tmp_path: Path, main: str) -> set[tuple[str, str]]:
+        from tests.unit.ingestion.test_chained_receiver_calls import _edges
+
+        edges = _edges(tmp_path, {"p/main.go": ("go", "package p\n\n" + main)}, links={})
+        return {(caller, callee) for caller, callee, _confidence, _origin in edges}
+
+    @pytest.mark.parametrize(
+        "main",
+        [
+            # a local map of funcs
+            "func Build(k string, x int) {\n"
+            "\thandlers := map[string]func(int){}\n\thandlers[k](x)\n}\n",
+            # a parameter
+            "func Build(handlers []func(int), x int) {\n\thandlers[0](x)\n}\n",
+            # no argument: the index_expression form
+            "func Build() {\n\tfs := []func(){}\n\tfs[0]()\n}\n",
+            # a struct field
+            "type S struct{ handlers map[string]func(int) }\n\n"
+            "func (s *S) Build(k string, x int) {\n\ts.handlers[k](x)\n}\n",
+        ],
+        ids=["local", "parameter", "no-argument", "field"],
+    )
+    def test_no_edge_when_no_symbol_has_the_name(self, tmp_path: Path, main: str) -> None:
+        assert self._edges(tmp_path, main) == set()
+
+    def test_a_package_level_container_gets_the_edge_its_plain_call_has(
+        self, tmp_path: Path
+    ) -> None:
+        """The edge to the variable is not new with the indexed form: a call
+        through a package-level func value has always had it."""
+        plain = self._edges(
+            tmp_path / "plain",
+            "var handlers = func(x int) {}\n\nfunc Build(x int) {\n\thandlers(x)\n}\n",
+        )
+        indexed = self._edges(
+            tmp_path / "indexed",
+            "var handlers = map[string]func(int){}\n\n"
+            "func Build(k string, x int) {\n\thandlers[k](x)\n}\n",
+        )
+        assert plain == {("p/main.go::Build", "p/main.go::handlers")}
+        assert indexed == plain

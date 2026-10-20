@@ -25,12 +25,14 @@ import { Layers, Sparkles, TrendingUp, Wand2 } from "lucide-react";
 import { CollapsibleSection } from "../shared/collapsible-section";
 import { Sheet, SheetContent, SheetTitle } from "../ui/sheet";
 import { Skeleton, SkeletonRegion } from "../ui/skeleton";
-import { formatNumber } from "../lib/format";
+import { disambiguateBasenames, formatNumber } from "../lib/format";
+import { FilePath } from "../shared/file-path";
 import { PlanComparison } from "./plan-comparison";
 import { GenerateCodePanel } from "./generate-code-panel";
+import { RefactoringModelToggle, type RefactoringModelToggleProps } from "./refactoring-settings-card";
 import { PriorityExplanation } from "./priority-explanation";
 import { ValidationSummary } from "./validation-summary";
-import { CONFIDENCE_LABEL, EFFORT_LABEL, typeMeta } from "./meta";
+import { CONFIDENCE_LABEL, EFFORT_LABEL, planBlurb, typeMeta } from "./meta";
 import { blastCount, blastFiles, evidenceRows, planWins } from "./types";
 import type {
   Confidence,
@@ -51,6 +53,8 @@ export interface RefactoringDrawerProps {
   /** Opt-in LLM code generation. Omit to hide the section entirely. */
   onGenerateCode?: ((plan: RefactoringPlan) => Promise<GeneratedCode>) | undefined;
   settingsHref?: string | undefined;
+  /** The code-generation switch, offered in place of the action while it is off. */
+  modelSetting?: RefactoringModelToggleProps | undefined;
   fileHref?: ((path: string, line?: number | null) => string | undefined) | undefined;
 }
 
@@ -64,6 +68,7 @@ export function RefactoringDrawer({
   onAiPrompt,
   onGenerateCode,
   settingsHref,
+  modelSetting,
   fileHref,
 }: RefactoringDrawerProps) {
   return (
@@ -82,6 +87,7 @@ export function RefactoringDrawer({
             onAiPrompt={onAiPrompt}
             onGenerateCode={onGenerateCode}
             settingsHref={settingsHref}
+            modelSetting={modelSetting}
             fileHref={fileHref}
             contextSlot={contextSlot}
           />
@@ -115,6 +121,7 @@ function DrawerBody({
   onAiPrompt,
   onGenerateCode,
   settingsHref,
+  modelSetting,
   fileHref,
   contextSlot,
 }: {
@@ -122,16 +129,23 @@ function DrawerBody({
   onAiPrompt?: ((plan: RefactoringPlan) => void) | undefined;
   onGenerateCode?: ((plan: RefactoringPlan) => Promise<GeneratedCode>) | undefined;
   settingsHref?: string | undefined;
+  modelSetting?: RefactoringModelToggleProps | undefined;
   fileHref?: ((path: string, line?: number | null) => string | undefined) | undefined;
   contextSlot?: ReactNode;
 }) {
   const meta = typeMeta(plan.refactoring_type);
+  const blurb = planBlurb(plan);
   const effort = (plan.effort_bucket || "M") as EffortBucket;
   const confidence = (plan.confidence || "medium") as Confidence;
   const evidence = evidenceRows(plan);
   const wins = planWins(plan);
   const blast = blastFiles(plan).filter((f) => f !== plan.file_path);
   const blastN = blastCount(plan);
+  const blastLabels = disambiguateBasenames(blast);
+  const lines =
+    plan.line_start && plan.line_end
+      ? `${plan.line_start}–${plan.line_end}`
+      : plan.line_start || null;
   const name = plan.file_path.split("/").pop() ?? plan.file_path;
 
   // One line of words, in the order a reader asks: how big, how sure, how far,
@@ -149,11 +163,13 @@ function DrawerBody({
         <SheetTitle className="mt-0.5 break-words font-mono text-[15px] font-semibold text-[var(--color-text-primary)]">
           {plan.target_symbol || name}
         </SheetTitle>
-        <p className="mt-1 break-all font-mono text-[11.5px] text-[var(--color-text-tertiary)]">
-          {plan.file_path}
-          {plan.line_start ? `:${plan.line_start}` : ""}
-          {plan.line_start && plan.line_end ? `–${plan.line_end}` : ""}
-        </p>
+        <FilePath
+          path={plan.file_path}
+          line={lines}
+          mode="full"
+          copyable
+          className="mt-1 block text-[11.5px] text-[var(--color-text-tertiary)]"
+        />
       </div>
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--color-border-default)] px-5 py-2.5 text-[12.5px] text-[var(--color-text-secondary)]">
@@ -171,7 +187,29 @@ function DrawerBody({
 
       <div className="flex-1 space-y-6 overflow-y-auto px-5 py-5">
         {contextSlot}
-        <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">{meta.blurb}</p>
+        <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">{blurb}</p>
+
+        {plan.risks && plan.risks.length > 0 ? (
+          <section>
+            <h4 className="mb-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+              Before you start
+            </h4>
+            <ul className="space-y-1">
+              {plan.risks.map((risk) => (
+                <li
+                  key={`${risk.kind}:${risk.ref ?? risk.text}`}
+                  className="flex items-start gap-2 text-sm text-[var(--color-text-secondary)]"
+                >
+                  <span
+                    className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-warning)]"
+                    aria-hidden
+                  />
+                  {risk.text}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
 
         <section>
           <h4 className="mb-3 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
@@ -197,6 +235,10 @@ function DrawerBody({
               ) : null}
             </div>
             <GenerateCodePanel plan={plan} onGenerate={onGenerateCode} />
+          </section>
+        ) : modelSetting ? (
+          <section className="border-t border-[var(--color-border-default)] pt-4">
+            <RefactoringModelToggle {...modelSetting} />
           </section>
         ) : null}
 
@@ -265,13 +307,13 @@ function DrawerBody({
                     {href ? (
                       <a
                         href={href}
-                        className="break-all font-mono text-xs text-[var(--color-text-secondary)] underline-offset-2 hover:text-[var(--color-accent-primary)] hover:underline"
+                        className="flex min-w-0 text-[var(--color-text-secondary)] underline-offset-2 hover:text-[var(--color-accent-primary)] hover:underline"
                       >
-                        {f}
+                        <FilePath path={f} mode="distinguishing" labels={blastLabels} />
                       </a>
                     ) : (
-                      <span className="break-all font-mono text-xs text-[var(--color-text-secondary)]">
-                        {f}
+                      <span className="flex min-w-0 text-[var(--color-text-secondary)]">
+                        <FilePath path={f} mode="distinguishing" labels={blastLabels} />
                       </span>
                     )}
                   </li>

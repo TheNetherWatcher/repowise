@@ -15,11 +15,13 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from repowise.core.analysis.finding_registry import gate_for
 from repowise.core.analysis.health import queue_rules
 from repowise.core.analysis.health.effort import EFFORT_ORDER
 from repowise.core.analysis.health.queue_rules import Facet, FilterRule, SortKeys
 from repowise.core.analysis.health.rows import detail_map, field
 
+from .commands import stored_runs
 from .recommendations import _loads_dict
 
 # ``refactoring_view`` predates the opportunity. Both old values keep working
@@ -43,8 +45,8 @@ DEFAULT_VIEW = "diversified"
 # Which open opportunities a queue lists:
 #
 # - ``fix_first``  the default for a repository-wide open queue: only the
-#   opportunities Fix first would take (its eligibility and exclusion rules,
-#   read from the same builder), with the rest counted by reason.
+#   opportunities Fix first would take (the judgement the index stored on each
+#   row), with the rest counted by reason.
 # - ``all``  the full inventory. The default when the caller names files (a
 #   file surface asks for its own work) or lists a triaged status, which Fix
 #   first never reads.
@@ -90,8 +92,9 @@ CANONICAL_ORDERS = tuple(SORTS)
 #: In the order the store has always emitted its predicates.
 FILTERS: tuple[FilterRule, ...] = (
     FilterRule("status", "status", "eq", "always"),
-    # A scope resolved in Python (Fix first's eligible set).
     FilterRule("opportunity_ids", "opportunity_id", "in", "set"),
+    # The ``fix_first`` scope: the judgement stored at index time.
+    FilterRule("queue_eligible", "queue_eligible", "is", "set"),
     # A list is how the board's "Structural" tab asks for four types at once.
     FilterRule("lead_types", "lead_refactoring_type", "in", "truthy"),
     FilterRule("confidence", "confidence", "eq", "set"),
@@ -105,14 +108,17 @@ FILTERS: tuple[FilterRule, ...] = (
     FilterRule("addresses_primary", "addresses_primary_problem", "is", "set"),
 )
 
-#: Facet name and the field it counts. No facet is cross-filtered: the counts
-#: are over the status and scope alone.
+#: Facet name, the field it counts, and the filter that narrows it. Each facet
+#: is counted under every other filter, so choosing a type keeps the other
+#: types' counts.
 FACETS: tuple[Facet, ...] = (
-    ("lead_type", "lead_refactoring_type", None),
-    ("effort", "effort_bucket", None),
-    ("confidence", "confidence", None),
+    ("lead_type", "lead_refactoring_type", "lead_types"),
+    ("effort", "effort_bucket", "effort"),
+    ("confidence", "confidence", "confidence"),
 )
 FACET_FIELDS = tuple(column for _, column, _ in FACETS)
+#: The filters a facet cross-filters by, applied after grouping, not in SQL.
+FACET_PARAMS = frozenset(param for _, _, param in FACETS if param)
 
 
 def sort_keys(order: str | None) -> SortKeys:
@@ -130,20 +136,31 @@ def row_sort_key(row: Any, order: str | None = None) -> tuple[Any, ...]:
     return queue_rules.sort_key(sort_keys(order), row)
 
 
-def fold_facets(groups: Iterable[Sequence[Any]]) -> dict[str, dict[str, int]]:
-    """Fold ``(*facet values, count)`` groups into per-facet counts; a NULL is skipped."""
-    return queue_rules.fold_facets(groups, FACETS)
+def split_facet_params(params: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(row filters, facet selection)``: the filters every count applies,
+    and the ones each facet applies to the others only."""
+    rows = {k: v for k, v in params.items() if k not in FACET_PARAMS}
+    return rows, {k: v for k, v in params.items() if k in FACET_PARAMS}
 
 
-def facet_counts(
-    rows: Iterable[Any], *, status: str = "open", opportunity_ids: Sequence[str] | None = None
+def fold_facets(
+    groups: Iterable[Sequence[Any]], selection: Mapping[str, Any] | None = None
 ) -> dict[str, dict[str, int]]:
-    """Counts for every facet over the rows a status (and scope) selects."""
-    params = {"status": status, "opportunity_ids": opportunity_ids}
+    """Fold ``(*facet values, count)`` groups into per-facet counts, each
+    cross-filtered by the *selection* of the others; a NULL is skipped."""
+    return queue_rules.fold_facets(groups, FACETS, rules=FILTERS, selection=selection)
+
+
+def facet_counts(rows: Iterable[Any], **params: Any) -> dict[str, dict[str, int]]:
+    """Counts for every facet over *rows*, under the queue filters in *params*."""
+    row_params, selection = split_facet_params({"status": "open", **params})
     return fold_facets(
-        (*(field(row, column) for column in FACET_FIELDS), 1)
-        for row in rows
-        if keep(row, params)
+        (
+            (*(field(row, column) for column in FACET_FIELDS), 1)
+            for row in rows
+            if keep(row, row_params)
+        ),
+        selection,
     )
 
 
@@ -286,18 +303,33 @@ def evidence_block(
     return block
 
 
-def summary_payload(row: Any | None) -> dict[str, Any]:
-    """The Level-1 rollup from the stored summary row."""
+def _gated_lead(lead: Any, include_unverified: bool) -> bool:
+    """True when the stored lead sits on a file a language gate holds back."""
+    return bool(
+        lead
+        and not include_unverified
+        and gate_for("refactoring", lead.get("file_path") or "", lead.get("lead_refactoring_type"))
+    )
+
+
+def summary_payload(row: Any | None, *, include_unverified: bool = False) -> dict[str, Any]:
+    """The Level-1 rollup from the stored summary row.
+
+    A lead on a gated language is not named (``lead`` is ``None``); the stored
+    totals still count every opportunity.
+    """
     if row is None:
         return dict(UNAVAILABLE)
     payload = _loads_dict(field(row, "summary_json"))
+    if _gated_lead(payload.get("lead"), include_unverified):
+        payload["lead"] = None
     payload["status"] = "available"
     payload["refactoring_model_version"] = field(row, "refactoring_model_version")
     payload["analyzed_commit"] = field(row, "analyzed_commit")
     return payload
 
 
-def directive_from_summary(row: Any | None) -> dict[str, Any]:
+def directive_from_summary(row: Any | None, *, include_unverified: bool = False) -> dict[str, Any]:
     """The Level-0 lead from the stored summary row: one opportunity, and the
     exact call that opens it."""
     if row is None:
@@ -305,6 +337,19 @@ def directive_from_summary(row: Any | None) -> dict[str, Any]:
     payload = _loads_dict(field(row, "summary_json"))
     lead = payload.get("lead")
     total = int(payload.get("opportunities_total") or 0)
+    if _gated_lead(lead, include_unverified):
+        # Deliberate shortcut: the finalizer stores one lead, so a gated lead
+        # is withheld rather than replaced by the best shown opportunity.
+        # Upgrade path: store the best lead per gate state at finalize time.
+        return {
+            "status": "clear",
+            "reason": "lead_in_gated_language",
+            "detail": (
+                "The leading refactoring opportunity is on a file held back pending "
+                "verification for its language; include unverified results to see it."
+            ),
+            "opportunities_total": total,
+        }
     if not lead:
         # The finalizer never leads with a test file, so opportunities
         # without a lead are all in tests.
@@ -338,20 +383,27 @@ def directive_from_summary(row: Any | None) -> dict[str, Any]:
             "arguments": {"opportunity_id": lead.get("opportunity_id")},
         },
     }
-    # The honest half. A file's plans very often answer a different question
-    # from the one that made it the worst file, and saying so beats routing
-    # an agent to cleanup it will read as the fix.
+    note = _addresses_note(addresses, lead.get("lead_biomarker"))
+    if note:
+        directive["note"] = note
+    return directive
+
+
+def _addresses_note(addresses: bool | None, lead_biomarker: str | None) -> str | None:
+    """The honest half. A file's plans very often answer a different question
+    from the one that made it the worst file, and saying so beats routing an
+    agent to cleanup it will read as the fix."""
     if addresses is False:
-        directive["note"] = (
-            f"These steps do not address {lead.get('lead_biomarker')!r}, this file's "
+        return (
+            f"These steps do not address {lead_biomarker!r}, this file's "
             "dominant finding. Treat them as related cleanup, not the fix for it."
         )
-    elif addresses is None:
-        directive["note"] = (
+    if addresses is None:
+        return (
             "No dominant finding was recorded for this file, so whether these steps "
             "address it is unknown rather than no."
         )
-    return directive
+    return None
 
 
 def next_actions(row: Any, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -427,6 +479,8 @@ def serialize(
     for key in ("file_nloc", "dependents"):
         if isinstance(details.get(key), int):
             payload[key] = details[key]
+    if details.get("leaves_above_bar"):
+        payload["leaves_above_bar"] = details["leaves_above_bar"]
     if steps_limit is not None:
         kept = steps[: max(steps_limit, 0)]
         payload["steps"] = kept
@@ -480,6 +534,7 @@ def validation_from_profile(profile: Mapping[str, Any]) -> Any:
         for target in (profile.get("targets") or [])
         if isinstance(target, dict)
     ]
+    values["test_runs"] = stored_runs(profile)
     return ValidationPlan(**values)
 
 

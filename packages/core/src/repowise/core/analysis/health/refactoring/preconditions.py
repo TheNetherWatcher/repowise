@@ -38,12 +38,19 @@ JUDGMENT_REASONS = (
     "call_site_bindings_unproven",
     "changes_symbol_home",
     "detector_confidence_below_high",
+    "governed_by_decision",
     "inverts_imports_across_files",
     "needs_design",
+    "receiver_copy_written",
+    "receiver_unbound",
     "reshapes_class_surface",
     "rewrites_dependent_imports",
+    "type_unresolved",
     "unclassified_refactoring_type",
 )
+
+# Named in ``unknowns`` when composition was not told which plans a decision governs.
+_GOVERNANCE = "governed_by_decision"
 
 # The categorical blast radius Extract Method publishes: extraction adds a
 # private helper and changes no signature, so nothing outside the file moves.
@@ -131,12 +138,22 @@ def _extract_method_reasons(suggestion: RefactoringSuggestion, facts: dict[str, 
 
     R1's dataflow gate proves the span behaviour-preserving before it is ever
     offered, and the blast radius is categorically local, so the only thing left
-    to check is that the detector itself was sure, and that an awaiting span
-    has an async function to land in.
+    to check is that the detector itself was sure, that an awaiting span
+    has an async function to land in, that a typed helper signature has no
+    unresolved slots, and that the helper can share the span's receiver
+    (``extract_method._receiver_hazard``).
     """
     plan = suggestion.plan or {}
+    symbol = plan.get("new_symbol") or {}
+    signature = symbol.get("signature_text") or ""
+    slots = [*symbol.get("params", ()), *symbol.get("returns", ())]
+    if "<type>" in signature and any(slot.get("type") is None for slot in slots):
+        return ["type_unresolved"]
     if plan.get("needs_async") and plan.get("async_host") is False:
         return ["async_helper_unexpressible"]
+    hazard = plan.get("receiver_hazard")
+    if hazard in JUDGMENT_REASONS:
+        return [hazard]
     if not facts["local_scope"]:
         return ["changes_symbol_home"]
     if suggestion.confidence != "high":
@@ -176,8 +193,16 @@ _JUDGMENT_BY_TYPE: dict[str, tuple[str, ...]] = {
 }
 
 
-def classify_step(suggestion: RefactoringSuggestion) -> StepApplicability:
-    """Whether *suggestion* is safe to automate, and the facts behind that."""
+def classify_step(
+    suggestion: RefactoringSuggestion, *, governed: bool | None = None
+) -> StepApplicability:
+    """Whether *suggestion* is safe to automate, and the facts behind that.
+
+    *governed* says an accepted decision governs the target's file: whatever
+    the shape proves, a person checks the decision allows the change. ``None``
+    means nobody looked (composition from detector rows), and is named in
+    ``unknowns`` rather than read as "not governed".
+    """
     facts, unknowns = step_facts(suggestion)
     kind = suggestion.refactoring_type
     if kind == "extract_method":
@@ -188,6 +213,8 @@ def classify_step(suggestion: RefactoringSuggestion) -> StepApplicability:
         reasons = list(_JUDGMENT_BY_TYPE.get(kind, ("unclassified_refactoring_type",)))
     if needs_design(suggestion):
         reasons.insert(0, "needs_design")
+    if governed:
+        reasons.append("governed_by_decision")
     # ``all`` over nothing is True, so a future branch that returned no reason
     # would promote silently. Mechanical has to be positively argued.
     mechanical = bool(reasons) and all(reason in MECHANICAL_REASONS for reason in reasons)
@@ -195,7 +222,7 @@ def classify_step(suggestion: RefactoringSuggestion) -> StepApplicability:
         classification="mechanical" if mechanical else "judgment",
         reasons=tuple(reasons),
         facts=facts,
-        unknowns=unknowns,
+        unknowns=(*unknowns, _GOVERNANCE) if governed is None else unknowns,
     )
 
 

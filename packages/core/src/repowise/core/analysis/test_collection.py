@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
@@ -46,7 +46,9 @@ class Checkout:
 
     *read* returns a tracked file's text (``None`` when unreadable) and
     *exists* whether a path is present; :func:`read_checkout` answers both from
-    disk, a server may answer them from what it stores.
+    disk, a server may answer them from what it stores. *holding*, when given,
+    answers which tracked files hold any of some names without reading each
+    file here (``None`` when it cannot); without it every source is read.
     """
 
     tracked: list[str]
@@ -54,10 +56,17 @@ class Checkout:
     roots: PytestRoots
     read: Callable[[str], str | None]
     exists: Callable[[str], bool]
+    holding: Callable[[Collection[str]], Collection[str] | None] | None = None
 
 
-def read_checkout(repo_path) -> Checkout:
-    """Tracked files, their conftests and pytest configs, and pytest's collection roots."""
+def read_checkout(repo_path, head: str | None = None) -> Checkout:
+    """Tracked files, their conftests and pytest configs, and pytest's collection roots.
+
+    With *head* (a change's head commit) ``exists`` also counts that commit's
+    tree: a change read from another worktree's branch holds files this working
+    tree lacks. Ceiling: tracked paths and texts still come from the working
+    tree; reading them at *head* too is the upgrade.
+    """
     from .. import git_refs
     from ..pytest_roots import PYTEST_CONFIG_NAMES, read_pytest_roots
     from .test_selection import is_code_file, is_scan_source
@@ -78,7 +87,46 @@ def read_checkout(repo_path) -> Checkout:
         if (text := read(p)) is not None
     ]
     roots = read_pytest_roots((p, t) for p, t in texts if Path(p).name in PYTEST_CONFIG_NAMES)
-    return Checkout(tracked, texts, roots, read, lambda p: (root / p).is_file())
+    at_head: list[frozenset[str]] = []
+
+    def exists(path: str) -> bool:
+        if (root / path).is_file():
+            return True
+        if head is None:
+            return False
+        if not at_head:  # read once, on the first path the disk lacks
+            at_head.append(git_refs.tracked_paths_at(str(root), head))
+        return path in at_head[0]
+
+    return Checkout(tracked, texts, roots, read, exists, lambda n: _git_holding(root, n))
+
+
+# A cold grep of a large checkout takes seconds; past this the full read answers.
+_GREP_TIMEOUT_SECONDS = 30
+
+
+def _git_holding(root: Path, needles: Collection[str]) -> set[str] | None:
+    """Tracked files whose bytes hold any of *needles*, ignoring case: one ``git grep``.
+
+    The names go in on stdin (``-f -``), so no argument list grows with them.
+    ``None`` when git cannot answer in time, or for a needle that is not plain
+    ASCII on one line, whose matches only the Python read reports. Ceiling: a
+    name split by bytes that are not UTF-8 matches the lenient read only.
+    """
+    from .doc_drift.suggest import git_run
+
+    needles = sorted(set(needles))
+    if not needles or not all(n.isascii() and n.isprintable() for n in needles):
+        return None
+    patterns = "".join(f"{n}\n" for n in needles).encode("utf-8")
+    ran = git_run(
+        root, "grep", "-l", "-z", "-F", "-i", "--no-color", "-f", "-", "--",
+        stdin=patterns, timeout=_GREP_TIMEOUT_SECONDS,
+    )  # fmt: skip
+    # Exit 1 is "no file holds any".
+    if ran is None or ran[0] not in (0, 1):
+        return None
+    return {p for p in ran[1].decode("utf-8", errors="replace").split("\0") if p}
 
 
 class SelectionCancelledError(Exception):
@@ -111,12 +159,16 @@ def plan_scopes(
     *cancelled* is polled between file reads, so an abandoned selection stops
     reading the checkout.
     """
+    from ..test_paths import is_test_related_path
+    from .fixture_readers import with_data_file_readers, with_fixture_readers
     from .selection_scopes import (
+        is_fixture_data,
+        is_manifest,
         keeps_full_run,
         needs_namers,
         trigger_scopes,
     )
-    from .test_selection import file_namers, is_scan_source
+    from .test_selection import file_namers, is_code_file
 
     paths = [*change.files, *change.deleted]
     # A file that runs everything anyway makes every namer search moot.
@@ -124,16 +176,49 @@ def plan_scopes(
     asked = [] if blocked else [p for p in paths if needs_namers(p, config)]
     namers: dict[str, list[str]] = {}
     if asked:
-        known = dict(checkout.pytest_texts)  # conftests and pytest configs, read already
-        texts = (
-            (p, known[p]) if p in known else (p, checkout.read(p) or "")
-            for p in checkout.tracked
-            if is_scan_source(p) and not _stop(cancelled)
-        )
-        namers = file_namers(asked, texts)
+        namers = file_namers(asked, _scan_texts(checkout, asked, cancelled), is_manifest)
+        # One classification per file: it walks the path's parts, and the
+        # checkout is every tracked file.
+        test_code: list[str] = []
+        other: list[str] = []
+        for p in checkout.tracked:
+            if is_code_file(p):
+                (test_code if is_test_related_path(p) else other).append(p)
+        namers = with_fixture_readers(namers, test_code, other, checkout.read, checkout.holding)
+        # A fixture data file runs the test code reading it; one no test code is
+        # known to read, or that production code names, keeps its full run.
+        if fixtures := [p for p in asked if is_fixture_data(p, config)]:
+            readers = with_data_file_readers(
+                fixtures, namers, test_code, other, checkout.read, checkout.holding
+            )
+            namers = {**{f: n for f, n in namers.items() if f not in fixtures}, **readers}
     scopes = trigger_scopes(paths, checkout.tracked, namers, config)
     routes = sorted({r for scope in scopes.values() for r in scope.routes} - set(paths))
     return Plan(namers, scopes, routes)
+
+
+def _scan_texts(
+    checkout: Checkout, asked: Collection[str], cancelled: Callable[[], bool]
+) -> Iterator[tuple[str, str]]:
+    """``(path, text)`` of every scan source, in tracked order, for :func:`file_namers`.
+
+    With ``checkout.holding`` only the code files holding one of the asked
+    names are read: a file holding none names nothing, so :func:`file_namers`
+    answers the same. Which name each holds is still decided on its text, so
+    one name inside another is attributed exactly as a full read would.
+    """
+    from .test_selection import is_scan_source
+
+    known = dict(checkout.pytest_texts)  # conftests and pytest configs, read already
+    names = {PurePosixPath(p).name for p in asked}
+    held = checkout.holding(names) if checkout.holding else None
+    for p in checkout.tracked:
+        if not is_scan_source(p) or _stop(cancelled):
+            continue
+        if p in known:
+            yield p, known[p]
+        elif held is None or p in held:
+            yield p, checkout.read(p) or ""
 
 
 async def collect(
@@ -148,6 +233,7 @@ async def collect(
     pytest_texts: dict | None = None,
     *,
     indexed_commit: str | None = None,
+    read_source: Callable[[str], str | None] | None = None,
 ) -> dict:
     """Resolve the change's files to impacted tests + labelled fallbacks.
 
@@ -157,7 +243,8 @@ async def collect(
     files a scope runs the tests of (:func:`plan_scopes`). With *explain*, the
     import route from that test to a changed file is looked up as well.
     *pytest_texts* are the checkout's conftests and pytest configs by path;
-    without them no conftest route is narrowed.
+    without them no conftest route is narrowed. *read_source* (``Checkout.read``)
+    lets that narrowing read the modules a conftest takes names from.
     """
     from ..persistence.crud import get_health_metrics, get_test_coverage_summary
     from ..persistence.crud.analysis.coverage_map import MAX_TEST_COVERAGE_ROWS
@@ -192,6 +279,7 @@ async def collect(
         roots,
         routes,
         pytest_texts,
+        read_source=read_source,
     )
     await _place_tests(session, repo_id, out)
     if explain:
@@ -230,31 +318,23 @@ async def _place_tests(session, repo_id: str, out: dict) -> None:
     except Exception as exc:
         out["graph_error"] = f"{type(exc).__name__}: {exc}"
         return
-    # An index older than the check cannot say which tests walk the tree, so
-    # it is out of date like any other; unplaced tests run anyway.
+    # An index older than the check cannot say which tests reach past their
+    # imports, so it is out of date like any other; unplaced tests run anyway.
     if unscanned and out["index_problem"] is None:
         out["index_problem"] = (
-            f"The index has not checked {len(unscanned)} test file(s) for walking the source "
-            f"tree or running the project (e.g. {unscanned[0]}); run `repowise update`."
+            f"The index has not checked {len(unscanned)} test file(s) for reaching code "
+            f"outside their imports (e.g. {unscanned[0]}); run `repowise update`."
         )
 
 
 def _indexed_commit(repo_path, row_commit: str | None, out: dict) -> None:
-    """The commit the index describes: ``state.json`` first, then the repository row.
+    """The commit the index describes, read by the one resolver the server's freshness uses."""
+    from ..workspace.update import resolve_indexed_commit
 
-    The same order the server's freshness check reads. When both are recorded
-    and disagree, the index's own history is in doubt, so the commit is unknown.
-    """
-    from ..workspace.update import read_state_commit
-
-    state = read_state_commit(Path(repo_path))
-    if state and row_commit and state != row_commit:
-        out["index_problem"] = (
-            f"The index records two commits ({state[:7]} in state.json, {row_commit[:7]} "
-            "in its database), so what it describes is unknown; run `repowise update`."
-        )
-        return
-    out["indexed_commit"] = state or row_commit
+    resolved = resolve_indexed_commit(Path(repo_path), row_commit)
+    if resolved.problem:
+        out["index_problem"] = resolved.problem
+    out["indexed_commit"] = resolved.sha
 
 
 def _gap_routes(repo_path, change, config, repo_keys: set[str], out: dict) -> list[str]:
@@ -277,14 +357,41 @@ def _gap_routes(repo_path, change, config, repo_keys: set[str], out: dict) -> li
         specs = [(rev, p) for p in plan.candidates for rev in (old, new)]
         blobs = read_blobs(str(repo_path), specs)
         # Unreadable means nothing was compared, so every candidate may have moved.
+        unread = _unread(repo_path, specs, blobs)
         rewired = [
             p
             for p in plan.candidates
-            if blobs is None or edges_may_differ(p, blobs.get((old, p)), blobs.get((new, p)))
+            if blobs is None
+            or p in unread
+            or edges_may_differ(p, blobs.get((old, p)), blobs.get((new, p)))
         ]
         plan = with_rewired(plan, rewired, repo_keys)
     out["gap"] = plan
     return list(plan.targets)
+
+
+def _unread(repo_path, specs: list[tuple[str, str]], blobs: Mapping | None) -> set[str]:
+    """Paths a blob read left out although the file exists at that revision.
+
+    A read that stops early (an unparseable header) drops the rest, which
+    would read as "added" or "deleted", i.e. unmoved. One batch existence check
+    over the missing specs tells those apart from files really absent there;
+    when it cannot answer, every missing path counts as unread.
+    """
+    if blobs is None:
+        return set()
+    missing = [spec for spec in specs if spec not in blobs]
+    if not missing:
+        return set()
+    from .doc_drift.suggest import git_run
+
+    request = "".join(f"{rev}:{path}\n" for rev, path in missing).encode("utf-8")
+    ran = git_run(Path(repo_path), "cat-file", "--batch-check=%(objecttype)", stdin=request)
+    lines = ran[1].decode("utf-8", "replace").splitlines() if ran and ran[0] == 0 else []
+    if len(lines) != len(missing):
+        return {path for _, path in missing}
+    # A missing object echoes the spec back with " missing"; anything else exists.
+    return {path for (_, path), line in zip(missing, lines, strict=True) if line == "blob"}
 
 
 def query_lines(change, measured: str | None) -> dict[str, set[int] | None]:
@@ -331,6 +438,7 @@ def empty_result(changed_files: int) -> dict:
         "explain_route": [],
         "helper_importers": {},
         "conftest_notes": [],
+        "test_hops": {},  # test file -> fewest hops from the change, for ordering only
         "changed_files": changed_files,
         "covered": {},  # test_id -> {test_file, source_files: [...]}
         "inferred": [],  # {source_file, test_file, via}
@@ -347,6 +455,8 @@ async def resolve_impacted(
     roots: PytestRoots | None = None,
     routes: tuple[str, ...] | list[str] = (),
     pytest_texts: dict | None = None,
+    *,
+    read_source: Callable[[str], str | None] | None = None,
 ) -> dict:
     """Classify each changed file: covered tests, inferred tests, or unknown.
 
@@ -380,13 +490,40 @@ async def resolve_impacted(
     ``unknown``
         Nothing said anything. Run the full suite.
     """
+    route_only = [r for r in routes if r not in changed]
+    graph_targets = sorted({*changed, *route_only})
+    has_rows = await _record_coverage(session, repo_id, changed, route_only, out)
+    if not graph_targets:
+        return out
+    try:
+        graph = await _graph_candidates(
+            session,
+            repo_id,
+            graph_targets,
+            roots,
+            pytest_texts=pytest_texts,
+            changed=changed,
+            read_source=read_source,
+        )
+    except Exception as exc:
+        # Nothing the graph said can be trusted; selection runs everything.
+        out["graph_error"] = f"{type(exc).__name__}: {exc}"
+        graph = GraphCandidates({}, {}, [], {})
+    out["helper_importers"] = graph.importers
+    out["conftest_notes"] = graph.notes
+    out["test_hops"] = graph.hops
+    _record_inferred(graph_targets, graph.candidates, changed, has_rows, repo_keys, out)
+    return out
+
+
+async def _record_coverage(
+    session, repo_id: str, changed: dict[str, set[int] | None], route_only: list[str], out: dict
+) -> set[str]:
+    """Fill ``out["covered"]`` from the per-test map; return the files it has rows for."""
     from ..persistence.crud import tests_covering, tests_covering_files
-    from .test_reachability import tests_matching_by_name
 
     covered: dict[str, dict] = out["covered"]
     has_rows: set[str] = set()
-    route_only = [r for r in routes if r not in changed]
-    graph_targets = sorted({*changed, *route_only})
     by_file = {f: await tests_covering(session, repo_id, f, lines=ls) for f, ls in changed.items()}
     if route_only and not out.get("map_empty"):
         by_file.update(await tests_covering_files(session, repo_id, set(route_only)))
@@ -399,41 +536,56 @@ async def resolve_impacted(
             )
             if source_file not in entry["source_files"]:
                 entry["source_files"].append(source_file)
+    return has_rows
 
-    if not graph_targets:
-        return out
 
-    try:
-        candidates, importers, notes = await _graph_candidates(
-            session, repo_id, graph_targets, roots, pytest_texts=pytest_texts
-        )
-    except Exception as exc:
-        # Nothing the graph said can be trusted; selection runs everything.
-        out["graph_error"] = f"{type(exc).__name__}: {exc}"
-        candidates, importers, notes = {}, {}, []
-    out["helper_importers"] = importers
-    out["conftest_notes"] = notes
+def _record_inferred(
+    graph_targets: list[str],
+    candidates: dict[str, list],
+    changed: Collection[str],
+    has_rows: set[str],
+    repo_keys: set[str],
+    out: dict,
+) -> None:
+    """``out["inferred"]`` and ``out["unknown"]``, in target order.
+
+    The filename pattern answers only a changed file nothing else did; a
+    route is only looked up to link tests to the change.
+    """
+    from .test_reachability import tests_matching_by_name
+
+    unanswered = [
+        f for f in graph_targets if not candidates.get(f) and f not in has_rows and f in changed
+    ]
+    # One name index for every file that needs a guess, not one per file.
+    guesses = tests_matching_by_name(unanswered, repo_keys) if unanswered else {}
+    asked = set(unanswered)
     for source_file in graph_targets:
         found = candidates.get(source_file)
         if found:
             out["inferred"].extend(
                 {"source_file": source_file, "test_file": t, "via": via} for t, via in found
             )
-            continue
-        if source_file in has_rows or source_file not in changed:
-            continue  # coverage answered, or a route; a name-shaped guess adds nothing
-        guess = tests_matching_by_name([source_file], repo_keys).get(source_file)
-        if guess:
-            out["inferred"].append(
-                {
-                    "source_file": source_file,
-                    "test_file": guess.tests[0],
-                    "via": "filename-pattern",
-                }
-            )
-        else:
-            out["unknown"].append(source_file)
-    return out
+        elif source_file in asked:
+            if guess := guesses.get(source_file):
+                out["inferred"].append(
+                    {
+                        "source_file": source_file,
+                        "test_file": guess.tests[0],
+                        "via": "filename-pattern",
+                    }
+                )
+            else:
+                out["unknown"].append(source_file)
+
+
+class GraphCandidates(NamedTuple):
+    """What :func:`_graph_candidates` found: per-target picks, importers, notes, hops."""
+
+    candidates: dict[str, list]
+    importers: dict[str, list[str]]
+    notes: list[str]
+    hops: dict[str, int]
 
 
 async def _graph_candidates(
@@ -443,14 +595,16 @@ async def _graph_candidates(
     roots: PytestRoots | None = None,
     *,
     pytest_texts: dict | None = None,
-) -> tuple[dict[str, list], dict[str, list[str]], list[str]]:
+    changed: Collection[str] | None = None,
+    read_source: Callable[[str], str | None] | None = None,
+) -> GraphCandidates:
     """``{target: [(test file, via), ...]}`` from the graph, each test file's importers, notes.
 
     Candidates come strongest tier first. The importers map says, for every
     test file the walk met, which test files import it. A conftest reached only
     through its imports stands for the tests it can break
-    (:mod:`repowise.core.analysis.conftest_routes`), read from *pytest_texts*;
-    the notes say what was decided.
+    (:mod:`repowise.core.analysis.conftest_routes`), read from *pytest_texts*
+    and *read_source*; the notes say what was decided.
 
     One walk per tier for every target, not one per file: the seed set
     is what makes it cheap. Uncapped, since a trimmed list would drop tests a
@@ -459,16 +613,21 @@ async def _graph_candidates(
     ``tests/``) are added until nothing new appears. Only code counts as a test
     node: a JSON or golden file the index flags as test material is data, not a
     route. A read failure raises.
+
+    The import edges are read once (:func:`load_import_graph`) and every walk
+    runs over them in memory; *hops* is each candidate's distance to the
+    *changed* files (every target when not given; :func:`_test_hops`).
     """
     from .conftest_routes import scoped_candidates
-    from .test_reachability import load_test_files
+    from .test_reachability import load_import_graph, load_test_files
     from .test_selection import is_code_file, plugin_loader
 
     texts = pytest_texts or {}
     test_files = {f for f in await load_test_files(session, repo_id) if is_code_file(f)}
-    found, entries = await _tier_picks(session, repo_id, targets, test_files, roots)
+    graph = await load_import_graph(session, repo_id)
+    found, entries, calls = await _tier_picks(session, repo_id, targets, test_files, roots, graph)
     seeds = {t for picks in found.values() for t in picks}
-    parents, parent_entries = await _test_importers(session, repo_id, seeds, test_files)
+    parents, parent_entries = await _test_importers(session, repo_id, seeds, test_files, graph)
     out, notes = await scoped_candidates(
         session,
         repo_id,
@@ -479,8 +638,40 @@ async def _graph_candidates(
         test_files,
         texts.get,
         plugin_loader=plugin_loader(texts.items()),
+        read_source=read_source,
     )
-    return out, {test: sorted(found_by) for test, found_by in parents.items()}, notes
+    importers = {test: sorted(found_by) for test, found_by in parents.items()}
+    sources = targets if changed is None else [t for t in targets if t in changed]
+    hops = _test_hops(out, calls, graph.hops(sources), set(sources))
+    return GraphCandidates(out, importers, notes, hops)
+
+
+def _test_hops(
+    candidates: Mapping[str, list],
+    calls: Mapping[str, Mapping[str, Any]],
+    imports: Mapping[str, int],
+    sources: Collection[str],
+) -> dict[str, int]:
+    """``{test file: fewest hops from any of *sources*}`` for every candidate the graph measures.
+
+    0 for a changed test, else the fewer of the call walk's hops (*calls*, per
+    target) and the file-dependency hops (*imports*, :meth:`ImportGraph.hops`
+    from *sources*), so 1 is a direct edge. A scope or gap route is not a
+    source. Ordering only: no test is selected for it. A test neither
+    measures (a filename guess, one reached only through a route) is absent.
+    """
+    best: dict[str, int] = {}
+    for target, picks in candidates.items():
+        by_call = calls.get(target, {}) if target in sources else {}
+        for test, via in picks:
+            options = [best.get(test), imports.get(test)]
+            if via == "changed-test" and target in sources:
+                options.append(0)
+            if (d := by_call.get(test)) is not None:
+                options.append(d.hops)
+            if known := [h for h in options if h is not None]:
+                best[test] = min(known)
+    return best
 
 
 def _all_tests(reached) -> tuple[str, ...]:
@@ -489,17 +680,24 @@ def _all_tests(reached) -> tuple[str, ...]:
 
 
 async def _tier_picks(
-    session, repo_id: str, targets: list[str], test_files: set[str], roots: PytestRoots | None
-) -> tuple[dict[str, dict[str, str]], dict[str, dict]]:
+    session,
+    repo_id: str,
+    targets: list[str],
+    test_files: set[str],
+    roots: PytestRoots | None,
+    graph=None,
+) -> tuple[dict[str, dict[str, str]], dict[str, dict], dict[str, Mapping[str, Any]]]:
     """``{target: {test file: via}}``: a changed test itself, then the call and import walks.
 
     Also ``{target: {test file: the files it was reached through}}`` from the
-    import walk.
+    import walk, and the call walk's distances per target.
     """
     from .test_reachability import tests_reaching_by_tier
     from .test_selection import is_runnable_test
 
-    reaching = await tests_reaching_by_tier(session, repo_id, targets, test_files=test_files)
+    reaching = await tests_reaching_by_tier(
+        session, repo_id, targets, test_files=test_files, import_graph=graph
+    )
     importers = await tests_reaching_by_tier(
         session,
         repo_id,
@@ -507,6 +705,7 @@ async def _tier_picks(
         call_depth=0,
         import_depth=_IMPORT_CLOSURE_DEPTH,
         test_files=test_files,
+        import_graph=graph,
     )
     found: dict[str, dict[str, str]] = {}
     entries = {t: dict(r.entries or {}) for t, r in importers.items()}
@@ -518,11 +717,12 @@ async def _tier_picks(
         for reached, via in ((reaching.get(target), None), (importers.get(target), "import-graph")):
             for t in _all_tests(reached) if reached else ():
                 picks.setdefault(t, via or reached.via)
-    return found, entries
+    calls = {t: r.reach for t, r in reaching.items() if r.reach}
+    return found, entries, calls
 
 
 async def _test_importers(
-    session, repo_id: str, seeds: set[str], test_files: set[str]
+    session, repo_id: str, seeds: set[str], test_files: set[str], graph=None
 ) -> tuple[dict[str, set[str]], dict[str, dict]]:
     """``{test file: test files importing it}``, walked until nothing new appears.
 
@@ -541,6 +741,7 @@ async def _test_importers(
             call_depth=0,
             import_depth=_IMPORT_CLOSURE_DEPTH,
             test_files=test_files,
+            import_graph=graph,
         )
         frontier = set()
         for test, reached in walked.items():
@@ -627,6 +828,7 @@ async def select_for_change(
         plan.routes,
         dict(checkout.pytest_texts),
         indexed_commit=indexed_commit,
+        read_source=checkout.read,
     )
     result["diff"] = change.label
     _stop(cancelled)
@@ -657,15 +859,21 @@ async def narrow_scopes(
         return out
     local = await session.get(Repository, repo_id)
     texts: dict[str, str] = {}
+    read_source = None
     if local is not None and local.local_path and Path(local.local_path).is_dir():
         try:
             checkout = await asyncio.to_thread(read_checkout, local.local_path)
             texts = dict(checkout.pytest_texts)
+            read_source = checkout.read
         except Exception as exc:  # unread conftests keep every test under them
             log.debug("narrow_scopes_checkout_failed", error=str(exc))
     files = sorted({t.split("::", 1)[0] for t in scoped})
     try:
-        candidates, _, _ = await _graph_candidates(session, repo_id, files, pytest_texts=texts)
+        candidates = (
+            await _graph_candidates(
+                session, repo_id, files, pytest_texts=texts, read_source=read_source
+            )
+        ).candidates
     except Exception as exc:  # the walk's own answer stands: every test under each scope
         log.debug("narrow_scopes_failed", error=str(exc))
         candidates = {}

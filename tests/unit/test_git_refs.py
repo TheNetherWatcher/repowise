@@ -10,6 +10,7 @@ import pytest
 from repowise.core.git_refs import (
     BranchRef,
     ahead_behind,
+    branch_with_path,
     changed_files,
     commit_file_sets,
     current_branch,
@@ -197,6 +198,24 @@ class TestCommitFileSets:
         assert commit_file_sets(str(tmp_path / "nowhere_at_all"), "main..feat") == []
 
 
+class TestBranchWithPath:
+    def test_names_the_other_branch_that_has_the_path(self, repo: Path) -> None:
+        assert branch_with_path(str(repo), "feat_two.txt") == "feat"
+
+    def test_skips_the_checked_out_branch(self, repo: Path) -> None:
+        # Only main, the checked-out branch whose tree the caller read, has it.
+        _commit(repo, "late.txt", "late\n", "main only")
+        assert branch_with_path(str(repo), "late.txt") is None
+        assert branch_with_path(str(repo), "typo.txt") is None
+
+    def test_finds_a_file_committed_in_a_linked_worktree(self, repo: Path, tmp_path: Path) -> None:
+        wt = tmp_path / "wt"
+        _run(repo, "worktree", "add", "-b", "wt-branch", str(wt), "main")
+        _commit(wt, "only_in_wt.txt", "x\n", "worktree work")
+
+        assert branch_with_path(str(repo), "only_in_wt.txt") == "wt-branch"
+
+
 class TestFindPathRemoval:
     def test_a_pure_rename_names_its_new_path(self, tmp_path: Path) -> None:
         root = tmp_path / "renamed"
@@ -269,6 +288,9 @@ class TestFindPathRemoval:
         "https://github.com/pallets/flask.git",
         "git@github.com:pallets/flask.git",
         "https://gitlab.example.com/group/sub/flask/",
+        "https://gitlab.com/group/flask/-/tree/main",
+        "git@ssh.dev.azure.com:v3/org/project/flask",
+        "/srv/git/flask.git",
     ],
 )
 def test_remote_name_is_the_last_url_segment(tmp_path: Path, url: str) -> None:
@@ -277,6 +299,12 @@ def test_remote_name_is_the_last_url_segment(tmp_path: Path, url: str) -> None:
     _run(root, "init", "-b", "main")
     _run(root, "remote", "add", "origin", url)
     assert remote_name(str(root)) == "flask"
+
+
+def test_remote_name_unescapes_a_name_with_spaces(tmp_path: Path) -> None:
+    _run(tmp_path, "init", "-b", "main")
+    _run(tmp_path, "remote", "add", "origin", "https://dev.azure.com/org/p/_git/My%20Repo")
+    assert remote_name(str(tmp_path)) == "My Repo"
 
 
 def test_remote_name_is_empty_without_a_remote(tmp_path: Path) -> None:

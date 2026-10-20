@@ -56,7 +56,9 @@
         "actionability_confidence": "medium",
         "amplification": "quadratic",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "entry_reachable",
+        "growth_source": "none",
         "leverage": "local",
         "loop_magnitude": "unknown"
       },
@@ -79,13 +81,13 @@
       "rank_factors": {
         "affected_call_sites": 4,
         "boundary_kind": 4,
-        "entry_reachability": 3,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 6,
         "provenance": 3
       },
-      "rank_score": 23,
+      "rank_score": 21,
       "reliable_entry_reachability": true,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -112,6 +114,201 @@
           "factor": "boundary_kind",
           "points": 4,
           "value": "db"
+        }
+      ]
+    },
+    {
+      "actionability_reason": "strategy_requires_validation",
+      "actionability_state": "advisory",
+      "affected_call_sites_total": 2,
+      "affected_files_total": 1,
+      "biomarker_type": "nested_loop_with_io",
+      "biomarker_types": [
+        "io_in_loop",
+        "nested_loop_with_io"
+      ],
+      "boundary_kind": "db",
+      "confidence": "high",
+      "evidence": [
+        {
+          "biomarker_type": "io_in_loop",
+          "file_path": "src/app/reindex.py",
+          "finding_id": "finding_dd1107d677ac5244c707",
+          "function_name": "one",
+          "line_end": 212,
+          "line_start": 210,
+          "path": [
+            "src/app/reindex.py::one",
+            "src/app/reindex.py::_write",
+            "src/app/db.py::upsert"
+          ],
+          "provenance": "call-site",
+          "reason": "cost_shape_merge: io_in_loop at src/app/reindex.py:210 repeats work per iteration."
+        },
+        {
+          "biomarker_type": "nested_loop_with_io",
+          "file_path": "src/app/reindex.py",
+          "finding_id": "finding_e7a60ff74d2f2b7ca67b",
+          "function_name": "many",
+          "line_end": 217,
+          "line_start": 215,
+          "path": [
+            "src/app/reindex.py::many",
+            "src/app/reindex.py::_write",
+            "src/app/db.py::upsert"
+          ],
+          "provenance": "call-site",
+          "reason": "cost_shape_merge: nested_loop_with_io at src/app/reindex.py:215 repeats work per iteration."
+        }
+      ],
+      "evidence_truncated": false,
+      "execution_context": "production",
+      "facets": {
+        "actionability_confidence": "medium",
+        "amplification": "quadratic",
+        "change_risk": "contained",
+        "execution_role": "unknown",
+        "exposure": "unknown",
+        "growth_source": "none",
+        "leverage": "local",
+        "loop_magnitude": "unknown"
+      },
+      "fix": {
+        "rationale": "The shared I/O sink is proven; no concrete batch API or result-equivalence proof is available.",
+        "safety": "advisory",
+        "strategy": "batch_or_prefetch_io"
+      },
+      "intervention_kind": "shared_helper",
+      "intervention_symbol": "src/app/reindex.py::_write",
+      "may_lead": false,
+      "observations_total": 2,
+      "opportunity_id": "perf3_a123c4c38fdb1cabaa6a",
+      "performance_model_version": 3,
+      "prerequisites": [
+        "batch_api_contract",
+        "result_equivalence"
+      ],
+      "provenance": "call-site",
+      "rank_factors": {
+        "affected_call_sites": 3,
+        "boundary_kind": 4,
+        "execution_context": 3,
+        "execution_role": 1,
+        "loop_magnitude": 0,
+        "multiplier_shape": 6,
+        "provenance": 3
+      },
+      "rank_score": 20,
+      "reliable_entry_reachability": null,
+      "resource_fingerprints": [],
+      "shared_path_suffix": [
+        "src/app/reindex.py::_write",
+        "src/app/db.py::upsert"
+      ],
+      "siblings": [],
+      "terminal_sink": "src/app/db.py::upsert",
+      "terminal_sinks": [
+        "src/app/db.py::upsert"
+      ],
+      "why_ranked": [
+        {
+          "factor": "multiplier_shape",
+          "points": 6,
+          "value": "nested_loop_with_io"
+        },
+        {
+          "factor": "boundary_kind",
+          "points": 4,
+          "value": "db"
+        },
+        {
+          "factor": "affected_call_sites",
+          "points": 3,
+          "value": 2
+        }
+      ]
+    },
+    {
+      "actionability_reason": "proven_strategy",
+      "actionability_state": "plan_ready",
+      "affected_call_sites_total": 1,
+      "affected_files_total": 1,
+      "biomarker_type": "io_in_loop",
+      "biomarker_types": [
+        "io_in_loop"
+      ],
+      "boundary_kind": "db",
+      "confidence": "high",
+      "evidence": [
+        {
+          "biomarker_type": "io_in_loop",
+          "file_path": "src/app/owners.py",
+          "finding_id": "finding_c7e0cff49d2e4944af6c",
+          "function_name": "load_owners",
+          "line_end": 22,
+          "line_start": 20,
+          "path": [],
+          "provenance": "direct",
+          "reason": "batch_form_equivalent: io_in_loop at src/app/owners.py:20 repeats work per iteration."
+        }
+      ],
+      "evidence_truncated": false,
+      "execution_context": "production",
+      "facets": {
+        "actionability_confidence": "high",
+        "amplification": "per_iteration",
+        "change_risk": "contained",
+        "execution_role": "unknown",
+        "exposure": "unknown",
+        "growth_source": "loop",
+        "leverage": "isolated",
+        "loop_magnitude": "grows_with_data"
+      },
+      "fix": {
+        "api": ".in_(\"repo_id\", keys)",
+        "rationale": "Every call filters on the loop's own key, so .in_(\"repo_id\", keys) covers the same rows, and nothing else in the loop can observe the difference.",
+        "safety": "proven",
+        "strategy": "batch_or_prefetch_io"
+      },
+      "intervention_kind": "function",
+      "intervention_symbol": "src/app/owners.py::load_owners",
+      "may_lead": true,
+      "observations_total": 1,
+      "opportunity_id": "perf3_83d258547498bed60226",
+      "performance_model_version": 3,
+      "prerequisites": [],
+      "provenance": "direct",
+      "rank_factors": {
+        "affected_call_sites": 2,
+        "boundary_kind": 4,
+        "execution_context": 3,
+        "execution_role": 1,
+        "loop_magnitude": 2,
+        "multiplier_shape": 4,
+        "provenance": 3
+      },
+      "rank_score": 19,
+      "reliable_entry_reachability": null,
+      "resource_fingerprints": [],
+      "shared_path_suffix": [],
+      "siblings": [],
+      "terminal_sink": null,
+      "terminal_sinks": [],
+      "why_ranked": [
+        {
+          "factor": "boundary_kind",
+          "points": 4,
+          "value": "db"
+        },
+        {
+          "factor": "multiplier_shape",
+          "points": 4,
+          "value": "io_in_loop"
+        },
+        {
+          "factor": "execution_context",
+          "points": 3,
+          "value": "production"
         }
       ]
     },
@@ -176,7 +373,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "entry_reachable",
+        "growth_source": "none",
         "leverage": "local",
         "loop_magnitude": "unknown"
       },
@@ -199,13 +398,13 @@
       "rank_factors": {
         "affected_call_sites": 4,
         "boundary_kind": 4,
-        "entry_reachability": 3,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 21,
+      "rank_score": 19,
       "reliable_entry_reachability": true,
       "resource_fingerprints": [],
       "shared_path_suffix": [],
@@ -231,6 +430,111 @@
           "factor": "multiplier_shape",
           "points": 4,
           "value": "io_in_loop"
+        }
+      ]
+    },
+    {
+      "actionability_reason": "no_supported_strategy",
+      "actionability_state": "investigate",
+      "affected_call_sites_total": 2,
+      "affected_files_total": 1,
+      "biomarker_type": "blocking_io_under_lock",
+      "biomarker_types": [
+        "blocking_io_under_lock"
+      ],
+      "boundary_kind": "db",
+      "confidence": "high",
+      "evidence": [
+        {
+          "biomarker_type": "blocking_io_under_lock",
+          "file_path": "src/app/pool.py",
+          "finding_id": "finding_2cca2a2e17c82f868f98",
+          "function_name": "reaper",
+          "line_end": 132,
+          "line_start": 130,
+          "path": [
+            "src/app/pool.py::reaper",
+            "src/app/store.py::flush_all",
+            "src/app/store.py::flush"
+          ],
+          "provenance": "call-site",
+          "reason": "distinct_lock_owners: blocking_io_under_lock at src/app/pool.py:130 repeats work per iteration."
+        },
+        {
+          "biomarker_type": "blocking_io_under_lock",
+          "file_path": "src/app/pool.py",
+          "finding_id": "finding_401246625d2b912b7c5c",
+          "function_name": "writer",
+          "line_end": 132,
+          "line_start": 130,
+          "path": [
+            "src/app/pool.py::writer",
+            "src/app/store.py::flush_all",
+            "src/app/store.py::flush"
+          ],
+          "provenance": "call-site",
+          "reason": "distinct_lock_owners: blocking_io_under_lock at src/app/pool.py:130 repeats work per iteration."
+        }
+      ],
+      "evidence_truncated": false,
+      "execution_context": "production",
+      "facets": {
+        "actionability_confidence": "low",
+        "amplification": "per_iteration",
+        "change_risk": "contained",
+        "execution_role": "unknown",
+        "exposure": "unknown",
+        "growth_source": "none",
+        "leverage": "local",
+        "loop_magnitude": "unknown"
+      },
+      "fix": null,
+      "intervention_kind": "shared_helper",
+      "intervention_symbol": "src/app/store.py::flush_all",
+      "may_lead": false,
+      "observations_total": 2,
+      "opportunity_id": "perf3_d3dace3672249fc9bd03",
+      "performance_model_version": 3,
+      "prerequisites": [
+        "single_lock_owner"
+      ],
+      "provenance": "call-site",
+      "rank_factors": {
+        "affected_call_sites": 3,
+        "boundary_kind": 4,
+        "execution_context": 3,
+        "execution_role": 1,
+        "loop_magnitude": 0,
+        "multiplier_shape": 5,
+        "provenance": 3
+      },
+      "rank_score": 19,
+      "reliable_entry_reachability": null,
+      "resource_fingerprints": [],
+      "shared_path_suffix": [
+        "src/app/store.py::flush_all",
+        "src/app/store.py::flush"
+      ],
+      "siblings": [],
+      "terminal_sink": "src/app/store.py::flush",
+      "terminal_sinks": [
+        "src/app/store.py::flush"
+      ],
+      "why_ranked": [
+        {
+          "factor": "multiplier_shape",
+          "points": 5,
+          "value": "blocking_io_under_lock"
+        },
+        {
+          "factor": "boundary_kind",
+          "points": 4,
+          "value": "db"
+        },
+        {
+          "factor": "affected_call_sites",
+          "points": 3,
+          "value": 2
         }
       ]
     },
@@ -283,7 +587,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "entry_reachable",
+        "growth_source": "none",
         "leverage": "local",
         "loop_magnitude": "unknown"
       },
@@ -306,13 +612,13 @@
       "rank_factors": {
         "affected_call_sites": 3,
         "boundary_kind": 4,
-        "entry_reachability": 3,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 20,
+      "rank_score": 18,
       "reliable_entry_reachability": true,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -391,7 +697,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "entry_reachable",
+        "growth_source": "none",
         "leverage": "local",
         "loop_magnitude": "unknown"
       },
@@ -414,13 +722,13 @@
       "rank_factors": {
         "affected_call_sites": 3,
         "boundary_kind": 4,
-        "entry_reachability": 3,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 20,
+      "rank_score": 18,
       "reliable_entry_reachability": true,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -442,300 +750,6 @@
           "factor": "multiplier_shape",
           "points": 4,
           "value": "io_in_loop"
-        },
-        {
-          "factor": "affected_call_sites",
-          "points": 3,
-          "value": 2
-        }
-      ]
-    },
-    {
-      "actionability_reason": "strategy_requires_validation",
-      "actionability_state": "advisory",
-      "affected_call_sites_total": 2,
-      "affected_files_total": 1,
-      "biomarker_type": "nested_loop_with_io",
-      "biomarker_types": [
-        "io_in_loop",
-        "nested_loop_with_io"
-      ],
-      "boundary_kind": "db",
-      "confidence": "high",
-      "evidence": [
-        {
-          "biomarker_type": "io_in_loop",
-          "file_path": "src/app/reindex.py",
-          "finding_id": "finding_dd1107d677ac5244c707",
-          "function_name": "one",
-          "line_end": 212,
-          "line_start": 210,
-          "path": [
-            "src/app/reindex.py::one",
-            "src/app/reindex.py::_write",
-            "src/app/db.py::upsert"
-          ],
-          "provenance": "call-site",
-          "reason": "cost_shape_merge: io_in_loop at src/app/reindex.py:210 repeats work per iteration."
-        },
-        {
-          "biomarker_type": "nested_loop_with_io",
-          "file_path": "src/app/reindex.py",
-          "finding_id": "finding_e7a60ff74d2f2b7ca67b",
-          "function_name": "many",
-          "line_end": 217,
-          "line_start": 215,
-          "path": [
-            "src/app/reindex.py::many",
-            "src/app/reindex.py::_write",
-            "src/app/db.py::upsert"
-          ],
-          "provenance": "call-site",
-          "reason": "cost_shape_merge: nested_loop_with_io at src/app/reindex.py:215 repeats work per iteration."
-        }
-      ],
-      "evidence_truncated": false,
-      "execution_context": "production",
-      "facets": {
-        "actionability_confidence": "medium",
-        "amplification": "quadratic",
-        "change_risk": "contained",
-        "exposure": "unknown",
-        "leverage": "local",
-        "loop_magnitude": "unknown"
-      },
-      "fix": {
-        "rationale": "The shared I/O sink is proven; no concrete batch API or result-equivalence proof is available.",
-        "safety": "advisory",
-        "strategy": "batch_or_prefetch_io"
-      },
-      "intervention_kind": "shared_helper",
-      "intervention_symbol": "src/app/reindex.py::_write",
-      "may_lead": false,
-      "observations_total": 2,
-      "opportunity_id": "perf3_a123c4c38fdb1cabaa6a",
-      "performance_model_version": 3,
-      "prerequisites": [
-        "batch_api_contract",
-        "result_equivalence"
-      ],
-      "provenance": "call-site",
-      "rank_factors": {
-        "affected_call_sites": 3,
-        "boundary_kind": 4,
-        "entry_reachability": 0,
-        "execution_context": 3,
-        "loop_magnitude": 0,
-        "multiplier_shape": 6,
-        "provenance": 3
-      },
-      "rank_score": 19,
-      "reliable_entry_reachability": null,
-      "resource_fingerprints": [],
-      "shared_path_suffix": [
-        "src/app/reindex.py::_write",
-        "src/app/db.py::upsert"
-      ],
-      "siblings": [],
-      "terminal_sink": "src/app/db.py::upsert",
-      "terminal_sinks": [
-        "src/app/db.py::upsert"
-      ],
-      "why_ranked": [
-        {
-          "factor": "multiplier_shape",
-          "points": 6,
-          "value": "nested_loop_with_io"
-        },
-        {
-          "factor": "boundary_kind",
-          "points": 4,
-          "value": "db"
-        },
-        {
-          "factor": "affected_call_sites",
-          "points": 3,
-          "value": 2
-        }
-      ]
-    },
-    {
-      "actionability_reason": "proven_strategy",
-      "actionability_state": "plan_ready",
-      "affected_call_sites_total": 1,
-      "affected_files_total": 1,
-      "biomarker_type": "io_in_loop",
-      "biomarker_types": [
-        "io_in_loop"
-      ],
-      "boundary_kind": "db",
-      "confidence": "high",
-      "evidence": [
-        {
-          "biomarker_type": "io_in_loop",
-          "file_path": "src/app/owners.py",
-          "finding_id": "finding_c7e0cff49d2e4944af6c",
-          "function_name": "load_owners",
-          "line_end": 22,
-          "line_start": 20,
-          "path": [],
-          "provenance": "direct",
-          "reason": "batch_form_equivalent: io_in_loop at src/app/owners.py:20 repeats work per iteration."
-        }
-      ],
-      "evidence_truncated": false,
-      "execution_context": "production",
-      "facets": {
-        "actionability_confidence": "high",
-        "amplification": "per_iteration",
-        "change_risk": "contained",
-        "exposure": "unknown",
-        "leverage": "isolated",
-        "loop_magnitude": "grows_with_data"
-      },
-      "fix": {
-        "api": ".in_(\"repo_id\", keys)",
-        "rationale": "Every call filters on the loop's own key, so .in_(\"repo_id\", keys) covers the same rows, and nothing else in the loop can observe the difference.",
-        "safety": "proven",
-        "strategy": "batch_or_prefetch_io"
-      },
-      "intervention_kind": "function",
-      "intervention_symbol": "src/app/owners.py::load_owners",
-      "may_lead": true,
-      "observations_total": 1,
-      "opportunity_id": "perf3_83d258547498bed60226",
-      "performance_model_version": 3,
-      "prerequisites": [],
-      "provenance": "direct",
-      "rank_factors": {
-        "affected_call_sites": 2,
-        "boundary_kind": 4,
-        "entry_reachability": 0,
-        "execution_context": 3,
-        "loop_magnitude": 2,
-        "multiplier_shape": 4,
-        "provenance": 3
-      },
-      "rank_score": 18,
-      "reliable_entry_reachability": null,
-      "resource_fingerprints": [],
-      "shared_path_suffix": [],
-      "siblings": [],
-      "terminal_sink": null,
-      "terminal_sinks": [],
-      "why_ranked": [
-        {
-          "factor": "boundary_kind",
-          "points": 4,
-          "value": "db"
-        },
-        {
-          "factor": "multiplier_shape",
-          "points": 4,
-          "value": "io_in_loop"
-        },
-        {
-          "factor": "execution_context",
-          "points": 3,
-          "value": "production"
-        }
-      ]
-    },
-    {
-      "actionability_reason": "no_supported_strategy",
-      "actionability_state": "investigate",
-      "affected_call_sites_total": 2,
-      "affected_files_total": 1,
-      "biomarker_type": "blocking_io_under_lock",
-      "biomarker_types": [
-        "blocking_io_under_lock"
-      ],
-      "boundary_kind": "db",
-      "confidence": "high",
-      "evidence": [
-        {
-          "biomarker_type": "blocking_io_under_lock",
-          "file_path": "src/app/pool.py",
-          "finding_id": "finding_2cca2a2e17c82f868f98",
-          "function_name": "reaper",
-          "line_end": 132,
-          "line_start": 130,
-          "path": [
-            "src/app/pool.py::reaper",
-            "src/app/store.py::flush_all",
-            "src/app/store.py::flush"
-          ],
-          "provenance": "call-site",
-          "reason": "distinct_lock_owners: blocking_io_under_lock at src/app/pool.py:130 repeats work per iteration."
-        },
-        {
-          "biomarker_type": "blocking_io_under_lock",
-          "file_path": "src/app/pool.py",
-          "finding_id": "finding_401246625d2b912b7c5c",
-          "function_name": "writer",
-          "line_end": 132,
-          "line_start": 130,
-          "path": [
-            "src/app/pool.py::writer",
-            "src/app/store.py::flush_all",
-            "src/app/store.py::flush"
-          ],
-          "provenance": "call-site",
-          "reason": "distinct_lock_owners: blocking_io_under_lock at src/app/pool.py:130 repeats work per iteration."
-        }
-      ],
-      "evidence_truncated": false,
-      "execution_context": "production",
-      "facets": {
-        "actionability_confidence": "low",
-        "amplification": "per_iteration",
-        "change_risk": "contained",
-        "exposure": "unknown",
-        "leverage": "local",
-        "loop_magnitude": "unknown"
-      },
-      "fix": null,
-      "intervention_kind": "shared_helper",
-      "intervention_symbol": "src/app/store.py::flush_all",
-      "may_lead": false,
-      "observations_total": 2,
-      "opportunity_id": "perf3_d3dace3672249fc9bd03",
-      "performance_model_version": 3,
-      "prerequisites": [
-        "single_lock_owner"
-      ],
-      "provenance": "call-site",
-      "rank_factors": {
-        "affected_call_sites": 3,
-        "boundary_kind": 4,
-        "entry_reachability": 0,
-        "execution_context": 3,
-        "loop_magnitude": 0,
-        "multiplier_shape": 5,
-        "provenance": 3
-      },
-      "rank_score": 18,
-      "reliable_entry_reachability": null,
-      "resource_fingerprints": [],
-      "shared_path_suffix": [
-        "src/app/store.py::flush_all",
-        "src/app/store.py::flush"
-      ],
-      "siblings": [],
-      "terminal_sink": "src/app/store.py::flush",
-      "terminal_sinks": [
-        "src/app/store.py::flush"
-      ],
-      "why_ranked": [
-        {
-          "factor": "multiplier_shape",
-          "points": 5,
-          "value": "blocking_io_under_lock"
-        },
-        {
-          "factor": "boundary_kind",
-          "points": 4,
-          "value": "db"
         },
         {
           "factor": "affected_call_sites",
@@ -793,7 +807,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "local",
         "loop_magnitude": "unknown"
       },
@@ -816,13 +832,13 @@
       "rank_factors": {
         "affected_call_sites": 3,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 17,
+      "rank_score": 18,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -885,7 +901,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -907,13 +925,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 5,
         "provenance": 3
       },
-      "rank_score": 17,
+      "rank_score": 18,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -973,7 +991,9 @@
         "actionability_confidence": "high",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -994,13 +1014,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [],
@@ -1055,7 +1075,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -1078,13 +1100,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [],
@@ -1139,7 +1161,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -1161,13 +1185,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [],
@@ -1225,7 +1249,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -1248,13 +1274,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -1316,7 +1342,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -1339,13 +1367,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -1404,7 +1432,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -1426,13 +1456,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [],
@@ -1487,7 +1517,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -1509,13 +1541,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [],
@@ -1573,7 +1605,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "not_entry_reachable",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -1596,13 +1630,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": false,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -1665,7 +1699,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "not_entry_reachable",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -1688,13 +1724,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": false,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -1711,90 +1747,6 @@
           "factor": "boundary_kind",
           "points": 4,
           "value": "db"
-        },
-        {
-          "factor": "multiplier_shape",
-          "points": 4,
-          "value": "io_in_loop"
-        },
-        {
-          "factor": "execution_context",
-          "points": 3,
-          "value": "production"
-        }
-      ]
-    },
-    {
-      "actionability_reason": "strategy_requires_validation",
-      "actionability_state": "advisory",
-      "affected_call_sites_total": 1,
-      "affected_files_total": 1,
-      "biomarker_type": "io_in_loop",
-      "biomarker_types": [
-        "io_in_loop"
-      ],
-      "boundary_kind": "network",
-      "confidence": "high",
-      "evidence": [
-        {
-          "biomarker_type": "io_in_loop",
-          "file_path": "src/app/retry.py",
-          "finding_id": "finding_0e8c0794491c7384f4c4",
-          "function_name": "post_with_retry",
-          "line_end": 52,
-          "line_start": 50,
-          "path": [],
-          "provenance": "direct",
-          "reason": "retry_loop: io_in_loop at src/app/retry.py:50 repeats work per iteration."
-        }
-      ],
-      "evidence_truncated": false,
-      "execution_context": "production",
-      "facets": {
-        "actionability_confidence": "medium",
-        "amplification": "per_iteration",
-        "change_risk": "contained",
-        "exposure": "unknown",
-        "leverage": "isolated",
-        "loop_magnitude": "bounded"
-      },
-      "fix": {
-        "rationale": "The shared I/O sink is proven; no concrete batch API or result-equivalence proof is available.",
-        "safety": "advisory",
-        "strategy": "batch_or_prefetch_io"
-      },
-      "intervention_kind": "function",
-      "intervention_symbol": "src/app/retry.py::post_with_retry",
-      "may_lead": false,
-      "observations_total": 1,
-      "opportunity_id": "perf3_bd36a05060a6d02a1245",
-      "performance_model_version": 3,
-      "prerequisites": [
-        "batch_api_contract",
-        "result_equivalence"
-      ],
-      "provenance": "direct",
-      "rank_factors": {
-        "affected_call_sites": 2,
-        "boundary_kind": 4,
-        "entry_reachability": 0,
-        "execution_context": 3,
-        "loop_magnitude": 0,
-        "multiplier_shape": 4,
-        "provenance": 3
-      },
-      "rank_score": 16,
-      "reliable_entry_reachability": null,
-      "resource_fingerprints": [],
-      "shared_path_suffix": [],
-      "siblings": [],
-      "terminal_sink": null,
-      "terminal_sinks": [],
-      "why_ranked": [
-        {
-          "factor": "boundary_kind",
-          "points": 4,
-          "value": "network"
         },
         {
           "factor": "multiplier_shape",
@@ -1841,7 +1793,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "not_entry_reachable",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -1864,13 +1818,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": false,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -1930,7 +1884,9 @@
         "actionability_confidence": "low",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -1948,13 +1904,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [],
@@ -2009,7 +1965,9 @@
         "actionability_confidence": "low",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -2027,13 +1985,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [],
@@ -2088,7 +2046,9 @@
         "actionability_confidence": "low",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -2106,13 +2066,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [],
@@ -2216,7 +2176,9 @@
         "actionability_confidence": "low",
         "amplification": "per_iteration",
         "change_risk": "moderate",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "shared",
         "loop_magnitude": "unknown"
       },
@@ -2232,13 +2194,13 @@
       "rank_factors": {
         "affected_call_sites": 4,
         "boundary_kind": 2,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 16,
+      "rank_score": 17,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -2255,6 +2217,85 @@
           "factor": "affected_call_sites",
           "points": 4,
           "value": 4
+        },
+        {
+          "factor": "multiplier_shape",
+          "points": 4,
+          "value": "io_in_loop"
+        },
+        {
+          "factor": "execution_context",
+          "points": 3,
+          "value": "production"
+        }
+      ]
+    },
+    {
+      "actionability_reason": "bounded_loop",
+      "actionability_state": "expected",
+      "affected_call_sites_total": 1,
+      "affected_files_total": 1,
+      "biomarker_type": "io_in_loop",
+      "biomarker_types": [
+        "io_in_loop"
+      ],
+      "boundary_kind": "network",
+      "confidence": "high",
+      "evidence": [
+        {
+          "biomarker_type": "io_in_loop",
+          "file_path": "src/app/retry.py",
+          "finding_id": "finding_0e8c0794491c7384f4c4",
+          "function_name": "post_with_retry",
+          "line_end": 52,
+          "line_start": 50,
+          "path": [],
+          "provenance": "direct",
+          "reason": "retry_loop: io_in_loop at src/app/retry.py:50 repeats work per iteration."
+        }
+      ],
+      "evidence_truncated": false,
+      "execution_context": "production",
+      "facets": {
+        "actionability_confidence": "low",
+        "amplification": "per_iteration",
+        "change_risk": "contained",
+        "execution_role": "unknown",
+        "exposure": "unknown",
+        "growth_source": "none",
+        "leverage": "isolated",
+        "loop_magnitude": "bounded"
+      },
+      "fix": null,
+      "intervention_kind": "function",
+      "intervention_symbol": "src/app/retry.py::post_with_retry",
+      "may_lead": false,
+      "observations_total": 1,
+      "opportunity_id": "perf3_bd36a05060a6d02a1245",
+      "performance_model_version": 3,
+      "prerequisites": [],
+      "provenance": "direct",
+      "rank_factors": {
+        "affected_call_sites": 2,
+        "boundary_kind": 4,
+        "execution_context": 3,
+        "execution_role": 1,
+        "loop_magnitude": 0,
+        "multiplier_shape": 4,
+        "provenance": 3
+      },
+      "rank_score": 17,
+      "reliable_entry_reachability": null,
+      "resource_fingerprints": [],
+      "shared_path_suffix": [],
+      "siblings": [],
+      "terminal_sink": null,
+      "terminal_sinks": [],
+      "why_ranked": [
+        {
+          "factor": "boundary_kind",
+          "points": 4,
+          "value": "network"
         },
         {
           "factor": "multiplier_shape",
@@ -2301,7 +2342,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -2324,13 +2367,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 2,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 15,
+      "rank_score": 16,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -2393,7 +2436,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -2416,13 +2461,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 2
       },
-      "rank_score": 15,
+      "rank_score": 16,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -2485,7 +2530,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -2508,13 +2555,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 1,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 14,
+      "rank_score": 15,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -2577,7 +2624,9 @@
         "actionability_confidence": "low",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -2593,13 +2642,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 2,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 14,
+      "rank_score": 15,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -2662,7 +2711,9 @@
         "actionability_confidence": "low",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -2678,13 +2729,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 2,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 14,
+      "rank_score": 15,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -2747,7 +2798,9 @@
         "actionability_confidence": "low",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -2771,13 +2824,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 4,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 0
       },
-      "rank_score": 13,
+      "rank_score": 14,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [
@@ -2837,7 +2890,9 @@
         "actionability_confidence": "low",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -2853,13 +2908,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 2,
-        "entry_reachability": 0,
         "execution_context": 1,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 12,
+      "rank_score": 13,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [],
@@ -2914,7 +2969,9 @@
         "actionability_confidence": "low",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -2930,13 +2987,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 2,
-        "entry_reachability": 0,
         "execution_context": 1,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 4,
         "provenance": 3
       },
-      "rank_score": 12,
+      "rank_score": 13,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [],
@@ -2991,7 +3048,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -3014,13 +3073,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 0,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 3,
         "provenance": 3
       },
-      "rank_score": 11,
+      "rank_score": 12,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [],
@@ -3075,7 +3134,9 @@
         "actionability_confidence": "medium",
         "amplification": "per_iteration",
         "change_risk": "contained",
+        "execution_role": "unknown",
         "exposure": "unknown",
+        "growth_source": "none",
         "leverage": "isolated",
         "loop_magnitude": "unknown"
       },
@@ -3097,13 +3158,13 @@
       "rank_factors": {
         "affected_call_sites": 2,
         "boundary_kind": 0,
-        "entry_reachability": 0,
         "execution_context": 3,
+        "execution_role": 1,
         "loop_magnitude": 0,
         "multiplier_shape": 3,
         "provenance": 3
       },
-      "rank_score": 11,
+      "rank_score": 12,
       "reliable_entry_reachability": null,
       "resource_fingerprints": [],
       "shared_path_suffix": [],

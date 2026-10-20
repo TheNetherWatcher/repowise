@@ -19,6 +19,8 @@ import { useRouter } from "next/navigation";
 import { parseAsString, parseAsStringLiteral, useQueryState } from "nuqs";
 import { useTranslations } from "next-intl";
 import { Wrench, RotateCw } from "lucide-react";
+import { ApiError } from "@repowise-dev/ui/shared/api-error";
+import { EmptyState } from "@repowise-dev/ui/shared/empty-state";
 import { PageShell } from "@repowise-dev/ui/shared/page-shell";
 import { ViewTabs } from "@repowise-dev/ui/shared/view-tabs";
 
@@ -40,29 +42,27 @@ import type {
   OpportunityStatus,
   RefactoringOpportunity,
   RefactoringOpportunityDetail,
-  RefactoringOpportunityDetailResolved,
   RefactoringOpportunityPage,
   RefactoringOrder,
   RefactoringPlan,
   RefactoringScope,
 } from "@repowise-dev/types/refactoring";
-import {
-  useRelatedWork,
-  AiPromptModal,
-  buildRefactoringOpportunityPrompt,
-  buildRefactoringPlanPrompt,
-} from "@repowise-dev/ui/health";
+import { useRelatedWork, AiPromptModal, type PromptSource } from "@repowise-dev/ui/health";
 import {
   generateRefactoringCode,
   getRefactoringOpportunities,
   getRefactoringOpportunity,
+  getRefactoringOpportunityPrompt,
   getRefactoringPlan,
+  getRefactoringPlanPrompt,
   getRefactoringSettings,
+  updateRefactoringSettings,
   updateRefactoringOpportunityStatus,
   type RefactoringSettings,
 } from "@/lib/api/refactoring";
 import { getFileContent } from "@/lib/api/files";
 import { getRelatedWork, relatedWorkHref } from "@/lib/api/related-work";
+import { providerSetupHref } from "@/lib/utils/page-href";
 
 const TYPE_VALUES = ["all", "structural", ...TYPE_ORDER] as const;
 type TypeFilter = (typeof TYPE_VALUES)[number];
@@ -178,24 +178,23 @@ export default function RefactoringPage({ params }: { params: Promise<{ id: stri
     { revalidateOnFocus: false, shouldRetryOnError: false },
   );
 
-  const [promptFor, setPromptFor] = useState<
-    | { kind: "opportunity"; value: RefactoringOpportunityDetailResolved }
-    | { kind: "plan"; value: RefactoringPlan }
-    | null
-  >(null);
-
-  // A row hands over its whole opportunity, which means fetching the detail the
-  // list deliberately does not carry. One call, on demand, rather than steps on
-  // every row of every page.
-  const onRowAiPrompt = useCallback(
-    async (opportunity: RefactoringOpportunity) => {
-      const detail = await getRefactoringOpportunity(repoId, opportunity.opportunity_id, {
-        stepLimit: 50,
-        evidenceLimit: 20,
-      });
-      if (detail.found) setPromptFor({ kind: "opportunity", value: detail });
-    },
-    [repoId],
+  // Core renders both prompts from the stored plans, so a row hands over its
+  // opportunity by id: the prompt route reads the steps the list does not carry.
+  const [promptFor, setPromptFor] = useState<{
+    kind: "opportunity" | "plan";
+    id: string;
+    filePath: string;
+  } | null>(null);
+  const promptSource = useMemo<PromptSource | undefined>(() => {
+    if (!promptFor) return undefined;
+    const load =
+      promptFor.kind === "opportunity" ? getRefactoringOpportunityPrompt : getRefactoringPlanPrompt;
+    return async (flavor) => (await load(repoId, promptFor.id, { flavor })).text;
+  }, [repoId, promptFor]);
+  const onOpportunityPrompt = useCallback(
+    (o: Pick<RefactoringOpportunity, "opportunity_id" | "file_path">) =>
+      setPromptFor({ kind: "opportunity", id: o.opportunity_id, filePath: o.file_path }),
+    [],
   );
 
   const onStatusChange = useCallback(
@@ -209,20 +208,36 @@ export default function RefactoringPage({ params }: { params: Promise<{ id: stri
     [repoId, mutate],
   );
 
-  // Opt-in code generation. Enabled only when the repo's config turns it on (a
-  // local-`serve` capability); the settings call 404s on hosted backends, which
-  // simply leaves the action hidden.
-  const { data: settings } = useSWR<RefactoringSettings>(
+  // Opt-in code generation (a local-`serve` capability). The action shows only
+  // when the switch is on and a model resolves; otherwise the plan drawer shows
+  // the switch, with a setup link when no model is configured. The settings
+  // call 404s on hosted backends, which hides both.
+  const { data: settings, mutate: mutateSettings } = useSWR<RefactoringSettings>(
     `refactoring-settings:${repoId}`,
     () => getRefactoringSettings(repoId),
     { revalidateOnFocus: false, shouldRetryOnError: false },
   );
   const onGenerateCode = useMemo(
     () =>
-      settings?.enabled
+      settings?.enabled && settings.provider
         ? (plan: RefactoringPlan) => generateRefactoringCode(repoId, plan.id)
         : undefined,
-    [settings?.enabled, repoId],
+    [settings?.enabled, settings?.provider, repoId],
+  );
+  const modelSetting = useMemo(
+    () =>
+      settings
+        ? {
+            value: settings,
+            onToggle: async (enabled: boolean) => {
+              await mutateSettings(await updateRefactoringSettings(repoId, enabled), {
+                revalidate: false,
+              });
+            },
+            setupHref: providerSetupHref(repoId),
+          }
+        : undefined,
+    [settings, mutateSettings, repoId],
   );
 
   const facetCounts = data?.facets?.lead_type ?? {};
@@ -255,6 +270,7 @@ export default function RefactoringPage({ params }: { params: Promise<{ id: stri
     scope,
     appliedScope: data?.scope ?? "all",
     hidden: data?.hidden ?? null,
+    counts: data?.counts ?? null,
     total: data?.total ?? 0,
     offset,
     nextOffset: data?.next_offset ?? null,
@@ -294,13 +310,21 @@ export default function RefactoringPage({ params }: { params: Promise<{ id: stri
           tabIndex={0}
         >
         {error ? (
-          <div className="rounded-2xl border border-[var(--color-error)]/30 bg-[var(--color-error)]/5 p-6 text-sm text-[var(--color-text-secondary)]">
-            {t("loadFailed")}
-          </div>
+          <ApiError
+            title={t("loadFailedTitle")}
+            message={t("loadFailed")}
+            retryLabel={tCommon("retry")}
+            onRetry={() => void mutate()}
+          />
         ) : data?.summary?.status === "unavailable" ? (
-          <div className="rounded-2xl border border-[var(--color-border-default)] p-6 text-sm text-[var(--color-text-secondary)]">
-            {data.summary.detail}
-          </div>
+          <EmptyState
+            title={t("unavailableTitle")}
+            description={t("unavailableDescription")}
+          >
+            {data.summary.detail ? (
+              <p className="mt-2 text-xs text-[var(--color-text-tertiary)]">{data.summary.detail}</p>
+            ) : null}
+          </EmptyState>
         ) : isLoading ? (
           // Matches the real layout's shapes: a lede block, a ribbon, a field.
           <SkeletonRegion className="space-y-8" label={t("loading")}>
@@ -326,7 +350,7 @@ export default function RefactoringPage({ params }: { params: Promise<{ id: stri
               if (change.offset !== undefined) setOffset(change.offset);
             }}
             onOpen={(o) => void setOpenId(o.opportunity_id)}
-            onAiPrompt={(o) => void onRowAiPrompt(o)}
+            onAiPrompt={onOpportunityPrompt}
             onStatusChange={onStatusChange}
             onSeeStructural={() => {
               setOffset(0);
@@ -358,12 +382,13 @@ export default function RefactoringPage({ params }: { params: Promise<{ id: stri
         onOpenChange={(open) => {
           if (!open) void setOpenId(null);
         }}
-        onAiPrompt={(detail) => setPromptFor({ kind: "opportunity", value: detail })}
+        onAiPrompt={onOpportunityPrompt}
         onStatusChange={onStatusChange}
         onOpenStep={(planId) => void setOpenPlanId(planId)}
         fileHref={fileHref}
         readSource={readSource}
         onGenerateCode={onGenerateCode}
+        modelSetting={modelSetting}
         related={related?.files?.[0]}
         relatedWorkHref={toRelated}
         onNavigate={(href) => router.push(href)}
@@ -375,9 +400,10 @@ export default function RefactoringPage({ params }: { params: Promise<{ id: stri
         onOpenChange={(open) => {
           if (!open) void setOpenPlanId(null);
         }}
-        onAiPrompt={(plan) => setPromptFor({ kind: "plan", value: plan })}
+        onAiPrompt={(plan) => setPromptFor({ kind: "plan", id: plan.id, filePath: plan.file_path })}
         onGenerateCode={onGenerateCode}
         settingsHref={`${prefix}/settings`}
+        modelSetting={modelSetting}
         fileHref={fileHref}
       />
 
@@ -386,18 +412,9 @@ export default function RefactoringPage({ params }: { params: Promise<{ id: stri
         onOpenChange={(open) => {
           if (!open) setPromptFor(null);
         }}
-        getPrompt={
-          promptFor
-            ? (flavor) =>
-                promptFor.kind === "opportunity"
-                  ? buildRefactoringOpportunityPrompt({
-                      opportunity: promptFor.value,
-                      flavor,
-                    })
-                  : buildRefactoringPlanPrompt({ plan: promptFor.value, flavor })
-            : null
-        }
-        filePath={promptFor?.value.file_path ?? null}
+        getPrompt={null}
+        promptSource={promptSource}
+        filePath={promptFor?.filePath ?? null}
         title={t("promptTitle")}
         description={t("promptDescription")}
       />
